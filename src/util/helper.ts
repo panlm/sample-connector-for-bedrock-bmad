@@ -50,16 +50,10 @@ const helper = {
                 Key: key,
             };
 
-            try {
-                const command = new GetObjectCommand(params);
-                const response = await client.send(command);
-                const byteArray = await response.Body.transformToByteArray();
-                return Buffer.from(byteArray).toString('base64');
-
-            } catch (error) {
-                // console.error("Error downloading and converting image:", error);
-                throw error;
-            }
+            const command = new GetObjectCommand(params);
+            const response = await client.send(command);
+            const byteArray = await response.Body.transformToByteArray();
+            return Buffer.from(byteArray).toString('base64');
 
         }
     },

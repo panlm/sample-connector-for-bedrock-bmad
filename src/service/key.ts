@@ -155,7 +155,7 @@ export default {
         }, ["id", "name", "email", "api_key", "role", "month_quota", "balance"]);
 
         if (email) {
-            const emailRegex = /^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$/;
+            const emailRegex = /^[\w.-]+@([\w-]+\.)+[\w-]{2,4}$/;
             if (emailRegex.test(email)) {
                 helper.sendMailApiKey(email, apiKey);
             }

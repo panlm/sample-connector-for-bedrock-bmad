@@ -116,14 +116,15 @@ export default class SagemakerDeepSeek extends AbstractProvider {
     let content: string, finish_reason: string,
       id: string, reasoning_content: string;
     switch (this.platform) {
-      case "deepseek":
+      case "deepseek": {
         id = chunkObj.id;
         const choice2 = chunkObj.choices.length > 0 ? chunkObj.choices[0] : null;
         content = choice2 && choice2.delta?.content;
         reasoning_content = choice2 && choice2.delta?.reasoning_content;
         finish_reason = choice2 && choice2.finish_reason;
         break;
-      default:
+      }
+      default: {
         id = this.newRequestID();
         const choice1 = chunkObj.choices.length > 0 ? chunkObj.choices[0] : null;
         const theContent = choice1 && choice1.delta?.content;
@@ -139,6 +140,7 @@ export default class SagemakerDeepSeek extends AbstractProvider {
         }
         finish_reason = choice1 && choice1.finish_reason;
         break;
+      }
     }
     return { id, content, finish_reason, reasoning_content };
   }

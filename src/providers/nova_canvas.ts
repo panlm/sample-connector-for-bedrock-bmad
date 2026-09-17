@@ -29,6 +29,22 @@ export default class NovaCanvas extends AbstractProvider {
     super();
   }
 
+  // Selects the content / tool_calls outputs from the LLM choices.
+  // Extracted from chat() so the missing-choice path is unit-testable.
+  // Uses safe optional chaining: when no choice matches, `choiceContent` /
+  // `choiceToolUse` are undefined and `?.message?.field` short-circuits to
+  // undefined (the downstream `if (content)` / `if (tool_calls)` falsy path)
+  // instead of throwing a TypeError from destructuring `undefined`.
+  static selectChoiceOutputs(choices: any[]) {
+    const choiceContent = choices.find(c => c?.message?.content);
+    const choiceToolUse = choices.find(c => c?.message?.tool_calls);
+    console.log("some", choiceContent, choiceToolUse);
+
+    const content = choiceContent?.message?.content;
+    const tool_calls = choiceToolUse?.message?.tool_calls;
+    return { content, tool_calls };
+  }
+
   async chat(chatRequest: ChatRequest, session_id: string, ctx: any) {
     // console.log("--------------｜｜chatreq-", chatRequest);
     let { paintModelId, localLlmModel, s3Bucket, s3Region, s3Prefix } = this.modelData.config;
@@ -72,17 +88,12 @@ export default class NovaCanvas extends AbstractProvider {
     const { choices } = promptResult;
     console.log(JSON.stringify(choices, null, 2));
 
-    const choiceContent = choices.find(c => c?.message?.content);
-    const choiceToolUse = choices.find(c => c?.message?.tool_calls);
-    console.log("some", choiceContent, choiceToolUse);
-
     // if (!choice) {
     //   // 处理没有找到合适的选择的情况
     //   return;
     // }
 
-    const { content } = choiceContent?.message;
-    const { tool_calls } = choiceToolUse?.message;
+    const { content, tool_calls } = NovaCanvas.selectChoiceOutputs(choices);
     let funName, args, imgs;
 
     if (content) {

@@ -1,0 +1,104 @@
+# Auto-merge for pipeline-authored PRs.
+#
+# Why this lives in CI and not in the agent: agents cannot edit .github/ (blocked by the
+# PreToolUse guardrail) and the runtime host's gh token has no `workflow` scope. So the
+# merge policy is the one thing the pipeline provably cannot rewrite. Adding more regexes
+# to the guardrail would only chase bypasses; moving the decision here removes the need.
+#
+# Fail-closed: every gate below must pass. A PR that does not declare the paths it owns
+# is never auto-merged.
+name: auto-merge
+
+on:
+  workflow_run:
+    workflows: [build]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR from the completed run
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          n=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefOid \
+                --jq "[.[]|select(.headRefOid==\"$SHA\")][0].number // empty")
+          if [ -z "$n" ]; then echo "no open PR at $SHA — nothing to do"; echo "skip=1" >>"$GITHUB_OUTPUT"; exit 0; fi
+          echo "number=$n" >>"$GITHUB_OUTPUT"
+
+      - name: Gate and merge
+        if: steps.pr.outputs.skip != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          N: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          gh pr view "$N" --repo "$GITHUB_REPOSITORY" \
+            --json number,headRefName,baseRefName,labels,mergeable,mergeStateStatus,body,files,isCrossRepository \
+            > pr.json
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+          pr = json.load(open("pr.json"))
+          n  = pr["number"]
+          def deny(msg):
+              print(f"::notice::auto-merge declined for #{n}: {msg}")
+              sys.exit(0)          # declining is not a build failure
+          # 1) only pipeline-authored branches, never a fork
+          if pr["isCrossRepository"]:            deny("cross-repository PR")
+          if not pr["headRefName"].startswith("agent/"): deny(f'head {pr["headRefName"]} is not agent/*')
+          if pr["baseRefName"] != "main":        deny(f'base is {pr["baseRefName"]}, not main')
+          # 2) explicit opt-in label
+          labels = {l["name"] for l in pr["labels"]}
+          if "auto-merge" not in labels:         deny("no auto-merge label")
+          # 3) textually clean
+          if pr["mergeable"] != "MERGEABLE":     deny(f'mergeable={pr["mergeable"]}')
+          if pr["mergeStateStatus"] in ("DIRTY", "BLOCKED", "BEHIND"):
+              deny(f'mergeStateStatus={pr["mergeStateStatus"]}')
+          # 4) every check run on the head must be green (build + ci + anything else)
+          out = subprocess.run(["gh","pr","checks",str(n),"--repo",os.environ["GITHUB_REPOSITORY"],
+                                "--json","name,state"],capture_output=True,text=True)
+          if out.returncode != 0 or not out.stdout.strip():
+              deny(f"cannot read check status (rc={out.returncode}) — refusing to merge blind")
+          bad = [c for c in json.loads(out.stdout) if c["state"] not in ("SUCCESS","SKIPPED","NEUTRAL")]
+          if bad: deny("checks not green: " + ", ".join(f'{c["name"]}={c["state"]}' for c in bad))
+          # 5) fail-closed path ownership: PR body must declare what it owns
+          owns = []
+          for line in (pr.get("body") or "").splitlines():
+              if line.strip().lower().startswith("auto-merge-paths:"):
+                  owns = [p.strip() for p in line.split(":",1)[1].split(",") if p.strip()]
+          if not owns: deny("PR body has no `Auto-merge-paths:` declaration")
+          # Path-aware glob: `*` must NOT cross a directory separator, otherwise a
+          # declaration that reads as narrow (`src/*`) silently matches `src/a/b/c.ts`
+          # and the ownership gate stops being a concurrency boundary at all.
+          # `**` is the explicit opt-in for recursion.
+          def _glob_re(g):
+              out, i = "", 0
+              while i < len(g):
+                  if g.startswith("**/", i):  out += "(?:.*/)?"; i += 3
+                  elif g.startswith("**", i): out += ".*";       i += 2
+                  elif g[i] == "*":           out += "[^/]*";    i += 1
+                  elif g[i] == "?":           out += "[^/]";     i += 1
+                  else:                       out += re.escape(g[i]); i += 1
+              return re.compile("\\A" + out + "\\Z")
+          pats = [_glob_re(g) for g in owns]
+          changed = [f["path"] for f in pr["files"]]
+          stray = [p for p in changed if not any(r.match(p) for r in pats)]
+          if stray:
+              deny(f'{len(stray)} of {len(changed)} file(s) outside declared ownership: {stray[:6]}'
+                   + (" ..." if len(stray) > 6 else ""))
+          print(f"::notice::auto-merge gates passed for #{n}; {len(changed)} file(s) within {owns}")
+          open("/tmp/go","w").write("go")   # 所有闸门通过的唯一信号
+          PY
+          if [ -f /tmp/go ]; then
+            gh pr merge "$N" --repo "$GITHUB_REPOSITORY" --squash --delete-branch
+            echo "merged #$N"
+          fi

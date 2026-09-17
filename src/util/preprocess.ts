@@ -61,17 +61,11 @@ export default {
         Key: key,
       };
 
-      try {
-        const command = new GetObjectCommand(params);
-        const response = await client.send(command);
-        const byteArray = await response.Body.transformToByteArray();
-        let nbuffer = await this.scaleDownImage(byteArray, 16, 2048);
-        return nbuffer.toString('base64');
-
-      } catch (error) {
-        // console.error("Error downloading and converting image:", error);
-        throw error;
-      }
+      const command = new GetObjectCommand(params);
+      const response = await client.send(command);
+      const byteArray = await response.Body.transformToByteArray();
+      let nbuffer = await this.scaleDownImage(byteArray, 16, 2048);
+      return nbuffer.toString('base64');
 
     }
   },
