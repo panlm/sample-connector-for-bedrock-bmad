@@ -9,9 +9,11 @@
 //   * Story 1.2 — add non-Anthropic families (amazon-nova, amazon-titan, meta-llama, ...):
 //       1. teach `resolveModel()` to recognise their modelIds (line-level, not vendor-level);
 //       2. register a `FamilyPolicy` in `FAMILY_POLICIES` for each.
-//   * Story 1.3 — add per-family `thinking` support:
-//       `buildAdditionalModelRequestFields()` currently injects `thinking` universally (migrated
-//       as-is from the old inline behaviour). Split it per family inside the family policy there.
+//   * Story 1.3 — per-family `thinking` support (DONE):
+//       `thinking` is no longer injected universally. Each `FamilyPolicy` declares a `thinking`
+//       cell (declarative data, not a function) gating whether thinking is assembled for that
+//       family, the amrf shape to inject, and the sampling constraints thinking imposes. See
+//       `ThinkingPolicy` and `resolveInferenceParams()`.
 
 export type Confidence = 'CONFIRMED' | 'TENTATIVE';
 
@@ -109,15 +111,46 @@ export function resolveModel(modelId: string): ResolvedModel {
 // Decision table
 // ---------------------------------------------------------------------------
 
+/**
+ * Declarative `thinking` (extended reasoning) support for a family — a decision-table CELL, NOT a
+ * function (AD-5/7). Story 1.3 makes `thinking` a per-family gated path independent of the normal
+ * sampling allow-set:
+ *   * `supported === false` → thinking is NEVER assembled for this family. Even if the client sends
+ *     `thinking.type === "enabled"`, no amrf.thinking is injected and the family's ordinary sampling
+ *     clipping is left untouched (this fixes defect D: the old inline code injected the Anthropic
+ *     `thinking` shape onto EVERY family unconditionally, 400-ing families that don't support it).
+ *   * `supported === true` → when the client enables thinking, `enabledField` is injected under
+ *     `enabledFieldName` (shape declared here, filled with the resolved `budget_tokens`), and
+ *     `samplingConstraints` are applied with PRIORITY OVER the allow-set (AD-5).
+ * The shape is family-owned data and MUST NOT be reused across families (AD-7).
+ */
+export interface ThinkingPolicy {
+    supported: boolean;
+    /** TENTATIVE(OQ-2) for families whose thinking support / field name is still an open question. */
+    confidence: Confidence;
+    /** amrf key under which the enabled-thinking field is injected (e.g. Anthropic: `thinking`). */
+    enabledFieldName?: string;
+    /** Declarative value template for the enabled field; `budget_tokens` is merged in at assembly. */
+    enabledFieldShape?: Record<string, any>;
+    /** Sampling constraints thinking forces, applied AFTER — and with priority over — the allow-set. */
+    samplingConstraints?: {
+        dropTopP?: boolean;
+        forceTemperature?: number;
+    };
+}
+
 interface FamilyPolicy {
     /**
      * Build the base `inferenceConfig` for this family. `maxTokens` is ALWAYS present; the family
      * decides which of temperature / topP / stopSequences it lets through (the "allow-set").
+     * This path is thinking-agnostic; thinking constraints are applied separately (AD-5).
      */
     buildInferenceConfig(rm: ResolvedModel, input: InferenceInput): InferenceConfig;
+    /** Per-family `thinking` decision cell (declarative). Gates the independent thinking path. */
+    thinking: ThinkingPolicy;
     /**
      * Assemble `additionalModelRequestFields` members owned by this family (anthropic_beta, ...).
-     * `thinking` is injected separately (universal) by the caller for Story 1.1.
+     * `thinking` is assembled separately by the caller via the `thinking` cell above.
      */
     buildAdditionalModelRequestFields?(rm: ResolvedModel, input: InferenceInput): Record<string, any>;
 }
@@ -150,20 +183,27 @@ function anthropicBetaFeatures(modelId: string): string[] {
 }
 
 const anthropicClaudePolicy: FamilyPolicy = {
+    // Anthropic supports extended reasoning. Shape: additionalModelRequestFields.thinking =
+    // { type: "enabled", budget_tokens: N }; thinking forces temperature=1 and drops topP.
+    thinking: {
+        supported: true,
+        confidence: 'CONFIRMED',
+        enabledFieldName: 'thinking',
+        enabledFieldShape: { type: 'enabled' },
+        samplingConstraints: { dropTopP: true, forceTemperature: 1 },
+    },
     buildInferenceConfig(rm, input) {
         const ic: InferenceConfig = { maxTokens: input.maxTokens };
 
         // Base sampling values with the legacy 0.7 defaults.
-        let temperature = input.temperature || 0.7;
+        const temperature = input.temperature || 0.7;
         const topP = input.topP || 0.7;
         let keepTemperature = true;
         let keepTopP = true;
 
-        // thinking forces temperature=1 and drops topP (migrated from old inline behaviour).
-        if (input.thinking) {
-            keepTopP = false;
-            temperature = 1;
-        }
+        // NOTE: thinking constraints (temperature=1 / drop topP) are NOT applied here anymore.
+        // They live in the family's `thinking` cell and are applied by resolveInferenceParams with
+        // priority over this allow-set (AD-5), so this path stays thinking-agnostic.
 
         if (isDeprecatedOpus(rm)) {
             // opus-4.x / opus-5: temperature and topP are both deprecated -> drop both.
@@ -206,6 +246,10 @@ const FAMILY_POLICIES: Record<string, FamilyPolicy> = {
  * until Story 1.2 adds their allow-set rows.
  */
 const denyAllPolicy: FamilyPolicy = {
+    // TENTATIVE(OQ-2): whether non-Anthropic families support thinking, and under what field name
+    // (e.g. `reasoning_config`), is an open question. Default to unsupported (safe) so no Anthropic
+    // shape is ever leaked onto a family that would 400 on it (AD-7). Never reuse Anthropic's shape.
+    thinking: { supported: false, confidence: 'TENTATIVE' },
     buildInferenceConfig(_rm, input) {
         return { maxTokens: input.maxTokens };
     },
@@ -214,6 +258,17 @@ const denyAllPolicy: FamilyPolicy = {
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
+
+/**
+ * Read-only accessor for a modelId's `thinking` decision-table cell (AC1.3-d): lets tests
+ * parameterize the expected field name / shape straight from the table instead of hard-coding it,
+ * proving the shape is declarative data owned per family and never crosses families.
+ */
+export function resolveThinkingPolicy(modelId: string): ThinkingPolicy {
+    const rm = resolveModel(modelId);
+    const policy = FAMILY_POLICIES[rm.family] || denyAllPolicy;
+    return policy.thinking;
+}
 
 /**
  * Resolve the clipped `{ inferenceConfig, additionalModelRequestFields }` for a request.
@@ -227,13 +282,32 @@ export function resolveInferenceParams(input: InferenceInput): InferenceOutput {
     const inferenceConfig = policy.buildInferenceConfig(rm, input);
 
     const additionalModelRequestFields: Record<string, any> = {};
-    // thinking is injected universally for Story 1.1 (migrated as-is; Story 1.3 splits it per family).
-    if (input.thinking) {
-        additionalModelRequestFields.thinking = {
-            type: 'enabled',
-            budget_tokens: input.thinkBudget,
-        };
+
+    // --- thinking: a per-family gated path, independent of the sampling allow-set (AD-5) ---
+    // Only families whose decision-table `thinking.supported` is true get thinking assembled.
+    // Unsupported families keep their normal sampling clipping untouched and receive NO
+    // amrf.thinking, even when the client explicitly enables it (fixes defect D).
+    const tp = policy.thinking;
+    if (input.thinking && tp.supported) {
+        // Constraints take PRIORITY over "client-supplied + allow-set": whatever buildInferenceConfig
+        // let through is overridden here (AD-5).
+        const sc = tp.samplingConstraints || {};
+        if (sc.dropTopP) {
+            delete inferenceConfig.topP;
+        }
+        if (typeof sc.forceTemperature === 'number') {
+            inferenceConfig.temperature = sc.forceTemperature;
+        }
+        // Inject the enabled field using THIS family's declared shape only — never cross families
+        // (AD-7). budget_tokens is merged from the resolved budget.
+        if (tp.enabledFieldName) {
+            additionalModelRequestFields[tp.enabledFieldName] = {
+                ...(tp.enabledFieldShape || {}),
+                budget_tokens: input.thinkBudget,
+            };
+        }
     }
+
     if (policy.buildAdditionalModelRequestFields) {
         Object.assign(additionalModelRequestFields, policy.buildAdditionalModelRequestFields(rm, input));
     }
