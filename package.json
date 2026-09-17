@@ -12,7 +12,7 @@
     "dev-ui": "vite",
     "build": "pnpm run build-server && pnpm run build-ui",
     "build-server": "rimraf ./dist/server && tsc --project ./tsconfig.json && pnpm run cp-config",
-    "cp-config": "cpy package.json dist/ && cpy 'src/scripts/**' dist/server/scripts/",
+    "cp-config": "node scripts/prepare-dist-package.mjs && cpy 'src/scripts/**' dist/server/scripts/",
     "build-ui": "vite build",
     "preview-ui": "vite preview",
     "run": "node dist/server/index.js"
