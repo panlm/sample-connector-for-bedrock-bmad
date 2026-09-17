@@ -202,6 +202,11 @@ export default class PGClient {
 
   public async deleteMulti(table: string, conditions: any) {
     conditions = conditions || {};
+    // 拒绝无条件删除：where 缺失 / null / 非字符串 / 纯空白都必须抛错，
+    // 绝不默认成 "1=1"（那会退化成清空整张表）。
+    if (typeof conditions.where !== "string" || conditions.where.trim() === "") {
+      throw new Error(`deleteMulti requires a non-empty "where" condition; refusing to run an unconditional DELETE on "${table}".`);
+    }
     const sql = `delete from ${table} where ${conditions.where} `;
     const { rowCount } = await this.query(sql, conditions.params);
     return rowCount > 0;
