@@ -9,6 +9,7 @@ import helper from "../util/helper";
 import WebResponse from "../util/response";
 import AbstractProvider from "./abstract_provider";
 import AnthropicResponse from '../util/anthropic_response';
+import { resolveInferenceParams } from '../util/inference_params';
 
 /**
 * BedrockConverse Provider uses boto3-converse api to invoke LLM models and support function calling.
@@ -862,58 +863,19 @@ class MessageConverter {
         const systemMessages = messages.filter(message => message.role === 'system');
 
         const uaMessages = messages.filter(message => message.role === 'user' || message.role === 'assistant' || message.role === 'tool' || message.role === 'function');
-        let stopSequences = chatRequest.stop;
-
-        const inferenceConfig: any = {
+        // Sampling params (inferenceConfig + additionalModelRequestFields) are clipped by the
+        // (family, generation) decision table in ../util/inference_params. toPayload no longer
+        // assembles them inline; it only merges non-sampling keys (promptCache cachePoint) below.
+        const { inferenceConfig, additionalModelRequestFields } = resolveInferenceParams({
+            modelId: config.modelId,
+            temperature: chatRequest.temperature,
+            topP: chatRequest.top_p,
+            stop: chatRequest.stop,
+            thinking,
+            thinkBudget,
             maxTokens,
-            temperature: chatRequest.temperature || 0.7,
-            topP: chatRequest.top_p || 0.7
-        };
-
-        if (thinking) {
-            delete inferenceConfig.topP;
-            inferenceConfig.temperature = 1;
-        }
-
-        const additionalModelRequestFields: any = {
-        }
-        if (stopSequences && Array.isArray(stopSequences)) {
-            inferenceConfig.stopSequences = stopSequences.slice(0, 4);
-        }
-        if (thinking) {
-            additionalModelRequestFields.thinking = {
-                type: "enabled",
-                budget_tokens: thinkBudget
-            }
-        }
-
-        if (config.modelId.includes("anthropic")) {
-            // claude-opus-4 and later models deprecated temperature/topP
-            const isOpus4OrLater = config.modelId.includes("claude-opus-4");
-            if (isOpus4OrLater) {
-                delete inferenceConfig.temperature;
-                delete inferenceConfig.topP;
-            } else {
-                // fix: temperature and top_p cannot both be specified
-                if (chatRequest.top_p && (!chatRequest.temperature)) {
-                    delete inferenceConfig.temperature;
-                } else {
-                    delete inferenceConfig.topP;
-                }
-            }
-            const anthropicBetaFeatures = [];
-            if (config.modelId.includes("anthropic.claude-3-7-sonnet")) {
-                anthropicBetaFeatures.push("output-128k-2025-02-19")
-                anthropicBetaFeatures.push("token-efficient-tools-2025-02-19")
-            }
-            if (config.modelId.includes("anthropic.claude-sonnet-4")) {
-                anthropicBetaFeatures.push("context-1m-2025-08-07")
-            }
-            if (config.modelId.includes("anthropic.claude-sonnet-4-5")) {
-                anthropicBetaFeatures.push("context-management-2025-06-27")
-            }
-            additionalModelRequestFields["anthropic_beta"] = anthropicBetaFeatures;
-        }
+            config,
+        });
         //First element must be user message
         const newMessages = [];
 
@@ -1090,7 +1052,10 @@ class MessageConverter {
             });
         }
 
-        const rtn: any = { messages: alternatingMessages, inferenceConfig, additionalModelRequestFields };
+        const rtn: any = { messages: alternatingMessages, inferenceConfig };
+        if (additionalModelRequestFields) {
+            rtn.additionalModelRequestFields = additionalModelRequestFields;
+        }
 
         if (systemMessages.length > 0) {
             const system = [];
