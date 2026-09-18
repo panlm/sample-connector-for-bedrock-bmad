@@ -7,7 +7,7 @@
   "scripts": {
     "test": "vitest run",
     "lint": "eslint \"src/**/*.ts\"",
-    "lint:ui": "eslint src-frontend",
+    "lint:ui": "eslint src-frontend --max-warnings 355",
     "start": "npx ts-node -T src/index.ts",
     "dev": "nodemon src/index.ts",
     "dev-ui": "vite",
