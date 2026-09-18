@@ -10,6 +10,18 @@
 name: auto-merge
 
 on:
+  # Labelling is a second, independent entry point, and it is required rather
+  # than convenient: the `auto-merge` label is granted by the review stage, which
+  # by construction finishes AFTER the build. With only the workflow_run trigger
+  # the gate always evaluated before the label existed, declined with "no
+  # auto-merge label", and nothing ever re-evaluated — so nothing merged at all.
+  #
+  # pull_request_target, not pull_request: it takes the workflow definition from
+  # the base branch, so this applies to PRs that are already open. It is safe
+  # here because this job never checks out PR code — it only reads metadata and
+  # calls the merge API.
+  pull_request_target:
+    types: [labeled]
   workflow_run:
     workflows: [build]
     types: [completed]
@@ -20,16 +32,29 @@ permissions:
 
 jobs:
   merge:
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+    # Either entry point may open the gate. Both still pass through every check
+    # below, so a label alone merges nothing — it only asks the question again.
+    if: >-
+      (github.event_name == 'pull_request_target' && github.event.label.name == 'auto-merge')
+      || (github.event_name == 'workflow_run'
+          && github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'pull_request')
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve PR from the completed run
+      - name: Resolve the PR under evaluation
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.event.workflow_run.head_sha }}
+          LABELED_PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # Labelled path: the PR number is handed to us directly.
+          if [ -n "${LABELED_PR:-}" ]; then
+            echo "evaluating #$LABELED_PR (label added)"
+            echo "number=$LABELED_PR" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
           n=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefOid \
                 --jq "[.[]|select(.headRefOid==\"$SHA\")][0].number // empty")
           if [ -z "$n" ]; then echo "no open PR at $SHA — nothing to do"; echo "skip=1" >>"$GITHUB_OUTPUT"; exit 0; fi
