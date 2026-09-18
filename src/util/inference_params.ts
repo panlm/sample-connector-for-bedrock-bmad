@@ -38,6 +38,8 @@ export interface ThinkingFragment {
     inferenceConfig: Record<string, any>;
     /** 是否删掉 inferenceConfig.topP（thinking 与 topP 互斥）。 */
     dropTopP: boolean;
+    /** 是否删掉 additionalModelRequestFields.top_k（Anthropic 扩展推理禁改 top_k，同传 → 400，FR-6）。 */
+    dropTopK: boolean;
     /** patch 进 additionalModelRequestFields 的键（thinking 块）。 */
     additionalModelRequestFields: Record<string, any>;
 }
@@ -90,7 +92,8 @@ interface FamilyRow {
 export const ALLOW_TABLE: Record<Family, FamilyRow> = {
     // 来源：Anthropic Claude on Bedrock Converse —— 支持 temperature/topP/top_k/stopSequences；
     // top_k 走 additionalModelRequestFields（非顶层 inferenceConfig）。
-    // 代次二选一（Sonnet/Haiku 4.5 同给 temperature+topP 只留其一）由 generationOverrides 声明（Story 1.2 / AC-9 / OQ-3 默认 b）。
+    // 代次二选一：**全部 Anthropic** 家族在客户端同给 temperature+topP 时只留其一（保留 temperature、裁 topP），
+    // 由 generationOverrides 声明。见下方 `when` 处对该 C 类硬约束偏离的完整论证。
     anthropic: {
         source: 'Anthropic on Bedrock Converse: maxTokens/temperature/topP/top_k(AMF)/stopSequences',
         params: {
@@ -102,13 +105,18 @@ export const ALLOW_TABLE: Record<Family, FamilyRow> = {
         thinkingSupported: true,
         generationOverrides: [
             {
-                // OQ-3 默认 (b)：仅 4.5 代次（Sonnet 4.5 / Haiku 4.5，major=4 && minor=5）强制二选一。
-                // 与旧 `isOpus4OrLater`（对 opus-4+ 删两参）不同 —— 这是按 OQ-3 默认的预期行为变更（Story 1.2 T1）：
-                // 旧代次两者都放行，仅 4.5 在同给时保留 temperature、裁 topP。
-                when: (g) => g.major === 4 && g.minor === 5,
+                // C 类硬约束偏离（stage6 回炉必修 2，reviewer 复审时独立复核）：
+                //  · 原约束：PRD BMAD-210 FR-4 收窄为「仅 Claude 4.5 强制二选一」。
+                //  · 为何不可满足：BMAD-201 缺陷 #2 明文要求 Opus5/Sonnet5（major≥5）同传 temp+topP 不得 400；
+                //    PRD「不适用于更旧模型」只覆盖了“旧”方向，漏了 major≥5 这个“更新”方向；且 base 原本对**全部**
+                //    Anthropic 二选一（"temperature and top_p cannot both be specified"），收窄到仅 4.5 既漏 Opus5 又回归了 opus-4。
+                //  · 原意图（本 issue 核心 axiom）：采样拼装后不因多传而 400（少传不会错、多传才 400），并覆盖需求点名的 Opus5。
+                //  · 修法（保守安全解）：对全部 Anthropic，客户端同给 temperature+topP 时统一保留 temperature、裁 topP。
+                //    一刀同修 ①Opus5/Sonnet5（缺陷 #2）②恢复 opus-4/3.x 保护（修回归）③裁一参永不 400（本 issue 已接受此权衡）。
+                when: () => true,
                 mutuallyExclusive: ['temperature', 'topP'],
                 keep: 'temperature',
-                source: 'PRD BMAD-210 §8 OQ-3 默认 (b) — 仅 Claude 4.5 强制 temperature/topP 二选一',
+                source: 'BMAD-201 缺陷 #2 + base 全 Anthropic 二选一 — 全部 Anthropic 同给 temperature/topP 时保留 temperature、裁 topP（stage6 回炉必修 2，C 类偏离）',
             },
         ],
     },
@@ -231,10 +239,14 @@ export function buildInferenceParams(modelClass: ModelClass, clientParams: Clien
     return { inferenceConfig, additionalModelRequestFields };
 }
 
-/** stop → stopSequences：仅接受数组并截断前 4 项（沿用既有行为）；其余原样。 */
+/**
+ * stop → stopSequences：截断前 4 项。
+ * 接受两种 OpenAI 合法形态：字符串（`stop:"END"` → `["END"]`）与数组；空数组 / 非法值 → undefined（不下发）。
+ */
 function normalizeValue(clientKey: string, value: any): any {
     if (clientKey === 'stop') {
-        if (Array.isArray(value)) return value.slice(0, 4);
+        if (typeof value === 'string') return [value];
+        if (Array.isArray(value)) return value.length > 0 ? value.slice(0, 4) : undefined;
         return undefined;
     }
     return value;
@@ -260,7 +272,7 @@ function place(
 /**
  * thinking 独立 builder（AD-6）。支持性来自表元数据，禁止 modelId.includes。
  * 不支持家族 → supported=false，组合方不下发 thinking 且不动采样（AC-13）。
- * 支持家族 → 下发 thinking 块、inferenceConfig.temperature=1、删 topP（AC-12 基础）。
+ * 支持家族 → 下发 thinking 块、inferenceConfig.temperature=1、删 topP、删 AMF.top_k（AC-12 基础 / FR-6）。
  *
  * budget 约束（FR-6 / AC-12）：`budget_tokens >= 1024`（本 builder 兜底下限）；
  * `budget_tokens < maxTokens` 由 AD-8① 的 maxTokens 终态解析保证（调用方在 maxTokens<=budget 时抬升 maxTokens=budget+1024）。
@@ -277,6 +289,7 @@ export function buildThinking(
         supported: false,
         inferenceConfig: {},
         dropTopP: false,
+        dropTopK: false,
         additionalModelRequestFields: {},
     };
 
@@ -295,6 +308,8 @@ export function buildThinking(
         supported: true,
         inferenceConfig: { temperature: 1 },
         dropTopP: true,
+        // FR-6：Anthropic 扩展推理禁改 top_k，若客户端给了 top_k 会同传 → 400，故 thinking 开启时必删。
+        dropTopK: true,
         additionalModelRequestFields: {
             thinking: {
                 type: 'enabled', // OQ-1：保持现状；Claude 4.7+/Opus5/Sonnet5 可能 400，评审知悉。

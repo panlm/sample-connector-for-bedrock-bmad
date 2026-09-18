@@ -64,6 +64,21 @@ describe('thinking：支持家族 anthropic (AC-12 基础/精化 / AC-14)', () =
         expect(budget).toBe(4000);
         expect(p.inferenceConfig.maxTokens).toBeGreaterThan(budget);
     });
+
+    // 回炉必修 1（FR-6）：Anthropic 扩展推理禁改 top_k，客户端同给 top_k 会同传 → 400。
+    // thinking 开启时 top_k 必须从最终请求体删除。（dev 原有 thinking 用例从不传 top_k，是假绿）
+    it('thinking + 客户端给 top_k → AMF.top_k 不存在、topP 不存在、temperature===1', async () => {
+        const p = await payloadFor(ANTHROPIC, {
+            thinking: { type: 'enabled', budget_tokens: 1500 },
+            temperature: 0.3,
+            top_p: 0.9,
+            top_k: 40,
+        });
+        expect(p.additionalModelRequestFields.top_k).toBeUndefined();
+        expect(p.additionalModelRequestFields.thinking).toBeDefined();
+        expect(p.inferenceConfig.topP).toBeUndefined();
+        expect(p.inferenceConfig.temperature).toBe(1);
+    });
 });
 
 describe('thinking：不支持家族 (AC-13)', () => {

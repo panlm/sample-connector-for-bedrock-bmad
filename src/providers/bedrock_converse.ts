@@ -890,20 +890,24 @@ class MessageConverter {
             if (thinkingFragment.dropTopP) {
                 delete inferenceConfig.topP;
             }
+            if (thinkingFragment.dropTopK) {
+                delete additionalModelRequestFields.top_k; // FR-6：扩展推理禁改 top_k，同传 → 400
+            }
             Object.assign(additionalModelRequestFields, thinkingFragment.additionalModelRequestFields); // thinking 块
         }
 
         // anthropic_beta 单独 producer（AD-8③）：只写 additionalModelRequestFields["anthropic_beta"]，不碰采样参数。保留不动。
-        if (config.modelId.includes("anthropic")) {
+        const modelId = config.modelId || '';
+        if (modelId.includes("anthropic")) {
             const anthropicBetaFeatures = [];
-            if (config.modelId.includes("anthropic.claude-3-7-sonnet")) {
+            if (modelId.includes("anthropic.claude-3-7-sonnet")) {
                 anthropicBetaFeatures.push("output-128k-2025-02-19")
                 anthropicBetaFeatures.push("token-efficient-tools-2025-02-19")
             }
-            if (config.modelId.includes("anthropic.claude-sonnet-4")) {
+            if (modelId.includes("anthropic.claude-sonnet-4")) {
                 anthropicBetaFeatures.push("context-1m-2025-08-07")
             }
-            if (config.modelId.includes("anthropic.claude-sonnet-4-5")) {
+            if (modelId.includes("anthropic.claude-sonnet-4-5")) {
                 anthropicBetaFeatures.push("context-management-2025-06-27")
             }
             additionalModelRequestFields["anthropic_beta"] = anthropicBetaFeatures;

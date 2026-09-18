@@ -33,6 +33,9 @@ async function payloadFor(modelId: string, extra: Record<string, any> = {}) {
 const M = {
     anthropicNew: 'anthropic.claude-sonnet-4-5-20250929-v1:0', // gen 4.5
     anthropicOld: 'us.anthropic.claude-3-5-sonnet-20240620-v1:0', // gen 3.5
+    anthropicOpus4: 'anthropic.claude-opus-4-20250514-v1:0', // gen 4.0
+    anthropicOpus5: 'anthropic.claude-opus-5-20260101-v1:0', // gen 5.0（缺陷 #2 点名）
+    anthropicSonnet5: 'anthropic.claude-sonnet-5-20260101-v1:0', // gen 5.0（缺陷 #2 点名）
     nova: 'amazon.nova-pro-v1:0',
     llama: 'meta.llama3-70b-instruct-v1:0',
     unknown: 'cohere.command-r-plus-v1:0', // → default
@@ -118,11 +121,33 @@ describe('矩阵：anthropic 新代次 sonnet-4-5 (AC-5 / AC-9 / AC-10)', () => 
     });
 });
 
-describe('矩阵：anthropic 旧代次 claude-3-5-sonnet (AC-5 补齐 / AC-9 边界 / OQ-3 默认 b)', () => {
-    it('同给 temperature+topP → 旧代次两者都放行（仅 4.5 才强制二选一）', async () => {
+// 回炉必修 2：二选一改为**全部 Anthropic**统一（保留 temperature、裁 topP）。
+// 同修 Opus5/Sonnet5（缺陷 #2 点名，major≥5）+ 恢复 opus-4/3.x 的 base 保护（修回归）。
+describe('矩阵：anthropic 全代次统一二选一 (AC-9 / 缺陷 #2 / 回炉必修 2)', () => {
+    it('opus-5 同给 temperature+topP → 只剩其一（保留 temperature）', async () => {
+        const p = await payloadFor(M.anthropicOpus5, GIVEN);
+        expect(p.inferenceConfig.temperature).toBe(0.3);
+        expect(p.inferenceConfig.topP).toBeUndefined();
+    });
+    it('sonnet-5 同给 temperature+topP → 只剩其一（保留 temperature）', async () => {
+        const p = await payloadFor(M.anthropicSonnet5, GIVEN);
+        expect(p.inferenceConfig.temperature).toBe(0.3);
+        expect(p.inferenceConfig.topP).toBeUndefined();
+    });
+    it('opus-4 同给 temperature+topP → 只剩其一（恢复 base 保护，修回归）', async () => {
+        const p = await payloadFor(M.anthropicOpus4, GIVEN);
+        expect(p.inferenceConfig.temperature).toBe(0.3);
+        expect(p.inferenceConfig.topP).toBeUndefined();
+    });
+    it('claude-3-5-sonnet 旧代次同给 → 也二选一（预期行为变更：base 本就对全 Anthropic 二选一）', async () => {
         const p = await payloadFor(M.anthropicOld, GIVEN);
         expect(p.inferenceConfig.temperature).toBe(0.3);
+        expect(p.inferenceConfig.topP).toBeUndefined();
+    });
+    it('只给 topP（不给 temperature）→ 二选一不触发，topP 保留', async () => {
+        const p = await payloadFor(M.anthropicOld, { top_p: 0.9 });
         expect(p.inferenceConfig.topP).toBe(0.9);
+        expect(p.inferenceConfig.temperature).toBeUndefined();
     });
 });
 
