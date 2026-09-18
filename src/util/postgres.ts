@@ -202,6 +202,15 @@ export default class PGClient {
 
   public async deleteMulti(table: string, conditions: any) {
     conditions = conditions || {};
+    // 拒绝无条件删除：where 缺失/null/空串/纯空白时，拼出的语句会退化成危险的
+    // `delete from <table> where ...`（错误或恒操作），必须显式抛错而非兜底成 "1=1"
+    // （对 delete 那等于删全表）。
+    // 注意：恒真 where（如 "1=1"）仍能删全表，属已知残留风险，待产品拍板，不在本次范围。
+    if (typeof conditions.where !== "string" || conditions.where.trim() === "") {
+      throw new Error(
+        `deleteMulti requires a non-empty "where" condition to avoid an unconditional delete of table "${table}"; received: ${JSON.stringify(conditions.where)}`
+      );
+    }
     const sql = `delete from ${table} where ${conditions.where} `;
     const { rowCount } = await this.query(sql, conditions.params);
     return rowCount > 0;
