@@ -202,11 +202,11 @@ export default class PGClient {
 
   public async deleteMulti(table: string, conditions: any) {
     conditions = conditions || {};
-    // 守卫：缺失/null/空/纯空白的 where 会退化成畸形或无条件的 DELETE —— 直接拒绝，
+    // 守卫：where 只接受非空字符串谓词。缺失/null/空/纯空白，以及任何非字符串真值
+    // （布尔 true、数组 ["1=1"] 等）都会退化成畸形或无条件的 DELETE —— 直接拒绝，
     // 而不是把危险语句下发到数据库。deleteMulti 是这一族里唯一的写操作，不能像 load/count
     // 那样默认 "1=1"（那会变成清表）。
-    if (conditions.where == null ||
-        (typeof conditions.where === "string" && conditions.where.trim() === "")) {
+    if (typeof conditions.where !== "string" || conditions.where.trim() === "") {
       throw new Error(
         `deleteMulti requires a non-empty 'where' condition (received ${JSON.stringify(conditions.where)}); refusing to build an unconditional DELETE FROM ${table}.`
       );

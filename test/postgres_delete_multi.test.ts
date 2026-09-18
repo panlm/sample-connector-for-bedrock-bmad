@@ -35,6 +35,18 @@ describe('deleteMulti — 空/缺失 where 守卫（回归：无条件 DELETE �
     expect(client.query).not.toHaveBeenCalled();
   });
 
+  it('where 为非字符串真值 true → 抛错拒绝，不下发 DELETE（回归：`where true` 清表绕过）', async () => {
+    const client = makeClient();
+    await expect(client.deleteMulti('victims', { where: true })).rejects.toThrow(/where/i);
+    expect(client.query).not.toHaveBeenCalled();
+  });
+
+  it('where 为数组 ["1=1"] → 抛错拒绝，不下发 DELETE（回归：数组绕过成 `where 1=1` 清表）', async () => {
+    const client = makeClient();
+    await expect(client.deleteMulti('victims', { where: ['1=1'] })).rejects.toThrow(/where/i);
+    expect(client.query).not.toHaveBeenCalled();
+  });
+
   it('正向：合法 where 仍然正常删除（守卫未误伤 happy path）', async () => {
     const client = makeClient(1);
     const ok = await client.deleteMulti('victims', { where: 'id=$1', params: [1] });
