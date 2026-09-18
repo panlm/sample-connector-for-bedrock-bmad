@@ -54,6 +54,23 @@ The configuration example:
 }
 ```
 
+## Sampling parameters (per-family allow-list)
+
+Sampling parameters are no longer injected with hard-coded defaults. The connector now forwards **only** the parameters that each model family accepts, driven by a data table (`src/util/inference_params.ts`). A parameter you do not send is not sent to Bedrock — the connector never fabricates a `temperature`/`topP` default on your behalf (the sole exception is the thinking path, which forces `temperature=1`).
+
+| Family | `temperature` | `topP` (`top_p`) | `top_k` | `stopSequences` (`stop`) | thinking |
+| --- | --- | --- | --- | --- | --- |
+| Anthropic (Claude) | ✅ inferenceConfig | ✅ inferenceConfig | ✅ additionalModelRequestFields | ✅ (first 4) | ✅ |
+| Amazon Nova | ✅ inferenceConfig | ✅ inferenceConfig | ✅ `additionalModelRequestFields.inferenceConfig.topK` (nested) | ✅ (first 4) | ❌ |
+| Meta Llama | ✅ inferenceConfig | ✅ inferenceConfig | ❌ dropped | ❌ conservative (unconfirmed) | ❌ |
+| default (any other) | ❌ | ❌ | ❌ | ❌ | ❌ — only `maxTokens` |
+
+Notes:
+
+- **Conservative / unconfirmed rows:** `default` (unknown families) forwards only `maxTokens`; Meta Llama `stopSequences` is dropped by default. These are marked "unconfirmed, conservative minimal set" in the table and can be widened by adding a single table row once verified.
+- **Anthropic Claude 4.5** (Sonnet 4.5 / Haiku 4.5): if both `temperature` and `top_p` are supplied, only one is kept (`temperature` is retained, `topP` is dropped) to avoid a Bedrock 400. Older Claude generations forward both.
+- **thinking risk:** the connector keeps `thinking.type: "enabled"`. This value is known to return 400 on Claude 4.7+/Opus 5/Sonnet 5; it is intentionally left unchanged.
+
 ## Output Results
 
 The output adds a reasoning_content field, consistent with deepseek's output. As follows:

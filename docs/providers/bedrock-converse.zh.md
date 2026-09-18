@@ -81,6 +81,23 @@ bedrock-converse 的配置示例如下：
 }
 ```
 
+## 采样参数（按家族的放行表）
+
+采样参数不再注入硬编码默认值。连接器现在改由数据表（`src/util/inference_params.ts`）驱动，**只**向每个模型家族下发它所接受的参数。你没传的参数就不会被下发到 Bedrock —— 连接器不再替你编造 `temperature`/`topP` 默认值（唯一例外是 thinking 路径，它会强制 `temperature=1`）。
+
+| 家族 | `temperature` | `topP`（`top_p`） | `top_k` | `stopSequences`（`stop`） | thinking |
+| --- | --- | --- | --- | --- | --- |
+| Anthropic (Claude) | ✅ inferenceConfig | ✅ inferenceConfig | ✅ additionalModelRequestFields | ✅（前 4 条） | ✅ |
+| Amazon Nova | ✅ inferenceConfig | ✅ inferenceConfig | ✅ `additionalModelRequestFields.inferenceConfig.topK`（嵌套） | ✅（前 4 条） | ❌ |
+| Meta Llama | ✅ inferenceConfig | ✅ inferenceConfig | ❌ 裁剪 | ❌ 保守裁剪（未确认） | ❌ |
+| default（其他任意家族） | ❌ | ❌ | ❌ | ❌ | ❌ —— 只放行 `maxTokens` |
+
+说明：
+
+- **保守/未确认行：** `default`（未知家族）只放行 `maxTokens`；Meta Llama 的 `stopSequences` 默认裁剪。这两处在表中标注为「未确认，保守最小集」，后续核实后只需增一行即可放行。
+- **Anthropic Claude 4.5**（Sonnet 4.5 / Haiku 4.5）：若同时给了 `temperature` 与 `top_p`，只保留其一（保留 `temperature`、裁掉 `topP`），以避免 Bedrock 400。更旧的 Claude 代次则两者都放行。
+- **thinking 风险：** 连接器保持 `thinking.type: "enabled"`。已知该值在 Claude 4.7+/Opus 5/Sonnet 5 上会返回 400，此处按现状保留、不静默修改。
+
 ## 输出结果
 
 输出中增加了 reasoning_content 字段，与 deepseek 的输出保持一致。如下：
