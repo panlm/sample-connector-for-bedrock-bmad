@@ -100,3 +100,42 @@ describe('thinking：不支持家族 (AC-13)', () => {
         expect(Object.keys(p.inferenceConfig)).toEqual(['maxTokens']);
     });
 });
+
+// ————————————————————————————————————————————————————————————————
+// 回炉必修（major，AD-8① 精化）：thinking 的 maxTokens 抬升必须在**家族支持 thinking 之后**才做。
+// 不支持 thinking 的家族即便触发 thinking（budget 8000 > config.maxTokens 2048），也不得把 maxTokens
+// 静默抬到 budget+1024=9024 突破配置上限——最终 maxTokens 必须 === config.maxTokens。
+// 变异证据：把 toPayload 里的抬升改回旧的无条件版本（去掉 supportsThinking 门），下面断言即变红。
+// ————————————————————————————————————————————————————————————————
+describe('thinking maxTokens 抬升的家族门 (AD-8① 精化 / 回炉必修 major)', () => {
+    it('llama + thinking(budget 8000, config.maxTokens 2048) → maxTokens 保持 2048、无 thinking 块', async () => {
+        const p = await payloadFor(
+            LLAMA,
+            { thinking: { type: 'enabled', budget_tokens: 8000 } },
+            { maxTokens: 2048 },
+        );
+        expect(p.inferenceConfig.maxTokens).toBe(2048);
+        expect(p.additionalModelRequestFields.thinking).toBeUndefined();
+    });
+
+    it('default + thinking(budget 8000, config.maxTokens 2048) → maxTokens 保持 2048、无 thinking 块', async () => {
+        const p = await payloadFor(
+            UNKNOWN,
+            { thinking: { type: 'enabled', budget_tokens: 8000 } },
+            { maxTokens: 2048 },
+        );
+        expect(p.inferenceConfig.maxTokens).toBe(2048);
+        expect(p.additionalModelRequestFields.thinking).toBeUndefined();
+    });
+
+    it('anthropic（支持家族）同场景 → 仍按 AD-8① 抬升 maxTokens > budget、下发 thinking', async () => {
+        const p = await payloadFor(
+            ANTHROPIC,
+            { thinking: { type: 'enabled', budget_tokens: 8000 } },
+            { maxTokens: 2048 },
+        );
+        // 支持家族：抬升仍生效（对照组，证明门只挡不支持家族、不误伤支持家族）。
+        expect(p.inferenceConfig.maxTokens).toBeGreaterThan(8000);
+        expect(p.additionalModelRequestFields.thinking).toBeDefined();
+    });
+});

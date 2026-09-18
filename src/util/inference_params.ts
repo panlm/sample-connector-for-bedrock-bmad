@@ -198,6 +198,16 @@ function parseAnthropicGeneration(id: string): Generation {
 }
 
 /**
+ * 家族是否支持 thinking —— AD-6 元数据的单一读出口。
+ * 组合方（bedrock_converse.toPayload）在决定是否为 thinking 抬升 maxTokens **之前**先问它：
+ * 不支持 thinking 的家族既不下发 thinking 块、也不得因 budget 抬升 maxTokens（否则静默突破 config 上限）。
+ * 与 buildThinking 内的支持判定同源同一张表，禁止 modelId.includes。
+ */
+export function supportsThinking(modelClass: ModelClass): boolean {
+    return ALLOW_TABLE[modelClass.family].thinkingSupported;
+}
+
+/**
  * 纯函数 builder：按放行表把客户端采样参数裁剪并落位（AD-1/4/5）。
  * 默认拒绝：先收客户端显式输入（key 存在即 `!== undefined`，禁止 `||` falsy 合并），再用表白名单过滤，表未列 = 删。
  * 系统不注入采样默认（temperature/topP 默认注入已彻底移除）。maxTokens 恒放行（已由调用方解析终态）。

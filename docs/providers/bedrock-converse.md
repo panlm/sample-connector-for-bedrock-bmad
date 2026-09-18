@@ -68,7 +68,8 @@ Sampling parameters are no longer injected with hard-coded defaults. The connect
 Notes:
 
 - **Conservative / unconfirmed rows:** `default` (unknown families) forwards only `maxTokens`; Meta Llama `stopSequences` is dropped by default. These are marked "unconfirmed, conservative minimal set" in the table and can be widened by adding a single table row once verified.
-- **Anthropic Claude 4.5** (Sonnet 4.5 / Haiku 4.5): if both `temperature` and `top_p` are supplied, only one is kept (`temperature` is retained, `topP` is dropped) to avoid a Bedrock 400. Older Claude generations forward both.
+- **Anthropic (all generations):** if both `temperature` and `top_p` are supplied, only one is kept (`temperature` is retained, `topP` is dropped) to avoid a Bedrock 400. This applies uniformly to every Claude generation (Opus/Sonnet 3.x, 4.x, and 5.x).
+- **thinking only bumps `maxTokens` for families that support it:** when thinking is enabled with a `budget` that would otherwise exceed `maxTokens`, `maxTokens` is raised to `budget + 1024` **only for families that actually emit a thinking block** (Anthropic). Families that do not support thinking (Nova/Llama/default) never emit a thinking block, so their `maxTokens` is left at your configured value and is never silently raised above your limit.
 - **thinking risk:** the connector keeps `thinking.type: "enabled"`. This value is known to return 400 on Claude 4.7+/Opus 5/Sonnet 5; it is intentionally left unchanged.
 
 ## Output Results

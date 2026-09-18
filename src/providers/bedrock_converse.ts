@@ -9,7 +9,7 @@ import helper from "../util/helper";
 import WebResponse from "../util/response";
 import AbstractProvider from "./abstract_provider";
 import AnthropicResponse from '../util/anthropic_response';
-import { resolveModelClass, buildInferenceParams, buildThinking } from '../util/inference_params';
+import { resolveModelClass, buildInferenceParams, buildThinking, supportsThinking } from '../util/inference_params';
 
 /**
 * BedrockConverse Provider uses boto3-converse api to invoke LLM models and support function calling.
@@ -834,11 +834,18 @@ class MessageConverter {
             thinkBudget = config.thinkBudget;
         }
 
+        // 家族/代次判定单一入口（AD-2）。提到 maxTokens 终态解析之前，供 thinking 抬升做家族门判定。
+        const modelClass = resolveModelClass(config.modelId);
+
         if (thinking) {
             if (!thinkBudget || thinkBudget < 1024) {
                 thinkBudget = 1024; // minimum budget_tokens
             }
-            if (maxTokens <= thinkBudget) {
+            // AD-8① 精化（stage6 回炉必修）：maxTokens 的 budget 抬升只在**家族确实支持 thinking**
+            // （会真正下发 thinking 块）时才做。不支持 thinking 的家族（llama/nova/default）即便客户端
+            // 触发了 thinking，也不下发 thinking 块，此时抬升 maxTokens 会静默突破 config 上限——故不抬升，
+            // maxTokens 保持 config 解析值。
+            if (supportsThinking(modelClass) && maxTokens <= thinkBudget) {
                 maxTokens = thinkBudget + 1024;
             }
         }
@@ -872,7 +879,7 @@ class MessageConverter {
         //     （thinking 的 temperature=1 / 删 topP 必须胜过家族裁剪结果）。
         //  ③ AMF 每 key 单一 producer：buildInferenceParams / buildThinking / 既有 anthropic_beta 互不写同一 key。
         // ————————————————————————————————————————————————————————————————
-        const modelClass = resolveModelClass(config.modelId);
+        // modelClass 已在上方 maxTokens 抬升前解析（AD-2 单一入口）。
 
         const inferenceFragment = buildInferenceParams(modelClass, {
             maxTokens,

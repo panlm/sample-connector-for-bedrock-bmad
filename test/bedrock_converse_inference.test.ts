@@ -149,6 +149,13 @@ describe('矩阵：anthropic 全代次统一二选一 (AC-9 / 缺陷 #2 / 回炉
         expect(p.inferenceConfig.topP).toBe(0.9);
         expect(p.inferenceConfig.temperature).toBeUndefined();
     });
+    // 矩阵补格（回炉次要）：旧代次 ×「不给参数」——补齐与新代次两格的对称性 (AC-5 / AC-10)。
+    it('旧代次完全不给 → 不注入 temperature/topP 默认，inferenceConfig 只含 maxTokens', async () => {
+        const p = await payloadFor(M.anthropicOld);
+        expect(p.inferenceConfig.temperature).toBeUndefined();
+        expect(p.inferenceConfig.topP).toBeUndefined();
+        expect(Object.keys(p.inferenceConfig)).toEqual(['maxTokens']);
+    });
 });
 
 describe('AD-4：禁 falsy 合并，temperature:0 是合法已给值', () => {
