@@ -42,9 +42,23 @@ jobs:
           N: ${{ steps.pr.outputs.number }}
         run: |
           set -euo pipefail
-          gh pr view "$N" --repo "$GITHUB_REPOSITORY" \
-            --json number,headRefName,baseRefName,labels,mergeable,mergeStateStatus,body,files,isCrossRepository \
-            > pr.json
+          # GitHub computes `mergeable` asynchronously. Right after a PR opens (or
+          # after main moves) it is UNKNOWN for a few seconds, and the gate below
+          # denies on anything that is not MERGEABLE. Reading it once therefore
+          # strands a perfectly good PR forever: auto-merge only fires on
+          # workflow_run, which has already happened, so nothing ever retries.
+          # Observed in run 1 — `auto-merge declined for #1: mergeable=UNKNOWN`
+          # on a PR whose checks were all green. Poll until GitHub commits to an
+          # answer; still fail closed if it never does.
+          for attempt in 1 2 3 4 5 6; do
+            gh pr view "$N" --repo "$GITHUB_REPOSITORY" \
+              --json number,headRefName,baseRefName,labels,mergeable,mergeStateStatus,body,files,isCrossRepository \
+              > pr.json
+            m="$(python3 -c 'import json;print(json.load(open("pr.json"))["mergeable"])')"
+            [ "$m" != "UNKNOWN" ] && break
+            echo "::notice::mergeable=UNKNOWN for #$N, attempt $attempt/6 — waiting for GitHub to compute it"
+            sleep 5
+          done
           python3 - <<'PY'
           import json, os, re, subprocess, sys
           pr = json.load(open("pr.json"))
