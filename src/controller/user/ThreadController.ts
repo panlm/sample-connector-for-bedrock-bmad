@@ -16,6 +16,8 @@ class ThreadController extends AbstractController {
     }
     async list(ctx: any) {
         const options = ctx.query;
+        const key_id = ctx.user.id;
+        options.key_id = key_id;
         const result = await service.list(ctx.db, options);
         return super.ok(ctx, result);
     }
