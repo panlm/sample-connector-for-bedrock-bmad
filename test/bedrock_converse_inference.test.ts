@@ -164,3 +164,66 @@ describe('AD-4：禁 falsy 合并，temperature:0 是合法已给值', () => {
         expect(p.inferenceConfig.temperature).toBe(0);
     });
 });
+
+// stage6 回炉必修（blocker）：显式 null/""/false/NaN/Infinity 采样值 → 丢弃（不透传，否则 Bedrock 400）。
+// 数值检测由「key 存在（!== undefined）」收紧为「是有限数值」。
+// 变异法守护：把 isFiniteNumber 改回 !== undefined，下列断言应变红。
+describe('取值型 400 防护：非有限数值采样值被丢弃 (回炉 blocker)', () => {
+    it('temperature:null → inferenceConfig 无 temperature', async () => {
+        const p = await payloadFor(M.anthropicNew, { temperature: null });
+        expect('temperature' in p.inferenceConfig).toBe(false);
+    });
+    it('top_k:null → AMF 无 top_k', async () => {
+        const p = await payloadFor(M.anthropicNew, { top_k: null });
+        expect('top_k' in p.additionalModelRequestFields).toBe(false);
+    });
+    it('top_p:null → inferenceConfig 无 topP', async () => {
+        const p = await payloadFor(M.anthropicNew, { top_p: null });
+        expect('topP' in p.inferenceConfig).toBe(false);
+    });
+    it('temperature:"" → 被丢弃', async () => {
+        const p = await payloadFor(M.anthropicNew, { temperature: '' });
+        expect('temperature' in p.inferenceConfig).toBe(false);
+    });
+    it('temperature:false → 被丢弃', async () => {
+        const p = await payloadFor(M.anthropicNew, { temperature: false });
+        expect('temperature' in p.inferenceConfig).toBe(false);
+    });
+    it('temperature:NaN / topP:Infinity → 均被丢弃', async () => {
+        const p = await payloadFor(M.anthropicNew, { temperature: NaN, top_p: Infinity });
+        expect('temperature' in p.inferenceConfig).toBe(false);
+        expect('topP' in p.inferenceConfig).toBe(false);
+    });
+    it('temperature:0 仍保留 0（勿误伤合法已给值）', async () => {
+        const p = await payloadFor(M.anthropicNew, { temperature: 0 });
+        expect(p.inferenceConfig.temperature).toBe(0);
+    });
+});
+
+// stage6 回炉必修（major，同根）：stop 归一化补缺值校验 —— 空串 / 非串元素被过滤。
+describe('取值型 400 防护：stop 归一化过滤空/非串元素 (回炉 major)', () => {
+    it('stop:"" → 无 stopSequences', async () => {
+        const p = await payloadFor(M.anthropicNew, { stop: '' });
+        expect(p.inferenceConfig.stopSequences).toBeUndefined();
+    });
+    it('stop:[123] → 非串元素被过滤（无 stopSequences）', async () => {
+        const p = await payloadFor(M.anthropicNew, { stop: [123] });
+        expect(p.inferenceConfig.stopSequences).toBeUndefined();
+    });
+    it('stop:[null] → 被过滤（无 stopSequences）', async () => {
+        const p = await payloadFor(M.anthropicNew, { stop: [null] });
+        expect(p.inferenceConfig.stopSequences).toBeUndefined();
+    });
+    it('stop:["END"] → ["END"]', async () => {
+        const p = await payloadFor(M.anthropicNew, { stop: ['END'] });
+        expect(p.inferenceConfig.stopSequences).toEqual(['END']);
+    });
+    it('stop:["a","b","c","d","e"] → 截断前 4', async () => {
+        const p = await payloadFor(M.anthropicNew, { stop: ['a', 'b', 'c', 'd', 'e'] });
+        expect(p.inferenceConfig.stopSequences).toEqual(['a', 'b', 'c', 'd']);
+    });
+    it('stop:["", "END", 123] → 混合过滤后只剩 ["END"]', async () => {
+        const p = await payloadFor(M.anthropicNew, { stop: ['', 'END', 123] });
+        expect(p.inferenceConfig.stopSequences).toEqual(['END']);
+    });
+});

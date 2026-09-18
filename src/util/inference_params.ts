@@ -220,11 +220,13 @@ export function buildInferenceParams(modelClass: ModelClass, clientParams: Clien
     // maxTokens 恒放行（AD-8①：调用方已解析终态）。
     inferenceConfig.maxTokens = clientParams.maxTokens;
 
-    // 收客户端显式输入 —— key 存在（!== undefined）才算给了；禁止 falsy 合并。
+    // 收客户端显式输入。数值参数须为有限数值（typeof 'number' && Number.isFinite），
+    // 一并挡住 null / "" / false / NaN / Infinity（客户端 JSON 零 coercion 直达，见 provider.ts:151）；
+    // 保留 temperature:0 / top_p:0（合法已给值）。禁止 `||` falsy 合并。
     const explicit: Record<string, any> = {};
-    if (clientParams.temperature !== undefined) explicit.temperature = clientParams.temperature;
-    if (clientParams.top_p !== undefined) explicit.top_p = clientParams.top_p;
-    if (clientParams.top_k !== undefined) explicit.top_k = clientParams.top_k;
+    if (isFiniteNumber(clientParams.temperature)) explicit.temperature = clientParams.temperature;
+    if (isFiniteNumber(clientParams.top_p)) explicit.top_p = clientParams.top_p;
+    if (isFiniteNumber(clientParams.top_k)) explicit.top_k = clientParams.top_k;
     if (clientParams.stop !== undefined) explicit.stop = clientParams.stop;
 
     // 表白名单过滤 + 落位。表未列的 key 直接丢弃。
@@ -255,11 +257,19 @@ export function buildInferenceParams(modelClass: ModelClass, clientParams: Clien
  */
 function normalizeValue(clientKey: string, value: any): any {
     if (clientKey === 'stop') {
-        if (typeof value === 'string') return [value];
-        if (Array.isArray(value)) return value.length > 0 ? value.slice(0, 4) : undefined;
-        return undefined;
+        // 归一化为非空字符串数组（截断前 4）；空串 / 非串元素 / 空数组 → undefined（不下发）。
+        // 部分家族拒空/非串 stop 元素 → 400；base 用 `stop && Array.isArray(stop)` 直接丢弃，故此处补齐取值校验。
+        const arr = (typeof value === 'string' ? [value] : Array.isArray(value) ? value : [])
+            .filter((s: any) => typeof s === 'string' && s.length > 0)
+            .slice(0, 4);
+        return arr.length ? arr : undefined;
     }
     return value;
+}
+
+/** 有限数值判定：挡住 null / "" / false / undefined / NaN / Infinity，保留 0。 */
+function isFiniteNumber(value: any): value is number {
+    return typeof value === 'number' && Number.isFinite(value);
 }
 
 function place(

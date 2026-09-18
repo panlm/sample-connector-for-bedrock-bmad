@@ -29,6 +29,7 @@ async function payloadFor(modelId: string, extra: Record<string, any> = {}, conf
 
 const ANTHROPIC = 'anthropic.claude-sonnet-4-5-20250929-v1:0';
 const LLAMA = 'meta.llama3-70b-instruct-v1:0';
+const NOVA = 'amazon.nova-pro-v1:0';
 const UNKNOWN = 'cohere.command-r-plus-v1:0';
 
 describe('thinking：支持家族 anthropic (AC-12 基础/精化 / AC-14)', () => {
@@ -98,6 +99,21 @@ describe('thinking：不支持家族 (AC-13)', () => {
         const p = await payloadFor(UNKNOWN, { thinking: { type: 'enabled', budget_tokens: 2000 } });
         expect(p.additionalModelRequestFields.thinking).toBeUndefined();
         expect(Object.keys(p.inferenceConfig)).toEqual(['maxTokens']);
+    });
+
+    // 需求点名 llama/nova/default 三家不支持 thinking；补齐 nova 覆盖（回炉 minor）。
+    it('nova 触发 thinking → 请求体不含 thinking，采样按放行表裁剪（topK 走嵌套）', async () => {
+        const p = await payloadFor(NOVA, {
+            thinking: { type: 'enabled', budget_tokens: 2000 },
+            temperature: 0.3,
+            top_p: 0.9,
+            top_k: 40,
+        });
+        expect(p.additionalModelRequestFields.thinking).toBeUndefined();
+        // 采样正常：temperature/topP 放行、未被 thinking 改写；Nova topK 走嵌套 inferenceConfig。
+        expect(p.inferenceConfig.temperature).toBe(0.3);
+        expect(p.inferenceConfig.topP).toBe(0.9);
+        expect(p.additionalModelRequestFields.inferenceConfig.topK).toBe(40);
     });
 });
 
