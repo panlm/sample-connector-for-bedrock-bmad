@@ -9,6 +9,7 @@ import helper from "../util/helper";
 import WebResponse from "../util/response";
 import AbstractProvider from "./abstract_provider";
 import AnthropicResponse from '../util/anthropic_response';
+import { resolveModelClass, buildInferenceParams, buildThinking, supportsThinking } from '../util/inference_params';
 
 /**
 * BedrockConverse Provider uses boto3-converse api to invoke LLM models and support function calling.
@@ -833,11 +834,18 @@ class MessageConverter {
             thinkBudget = config.thinkBudget;
         }
 
+        // 家族/代次判定单一入口（AD-2）。提到 maxTokens 终态解析之前，供 thinking 抬升做家族门判定。
+        const modelClass = resolveModelClass(config.modelId);
+
         if (thinking) {
             if (!thinkBudget || thinkBudget < 1024) {
                 thinkBudget = 1024; // minimum budget_tokens
             }
-            if (maxTokens <= thinkBudget) {
+            // AD-8① 精化（stage6 回炉必修）：maxTokens 的 budget 抬升只在**家族确实支持 thinking**
+            // （会真正下发 thinking 块）时才做。不支持 thinking 的家族（llama/nova/default）即便客户端
+            // 触发了 thinking，也不下发 thinking 块，此时抬升 maxTokens 会静默突破 config 上限——故不抬升，
+            // maxTokens 保持 config 解析值。
+            if (supportsThinking(modelClass) && maxTokens <= thinkBudget) {
                 maxTokens = thinkBudget + 1024;
             }
         }
@@ -862,54 +870,51 @@ class MessageConverter {
         const systemMessages = messages.filter(message => message.role === 'system');
 
         const uaMessages = messages.filter(message => message.role === 'user' || message.role === 'assistant' || message.role === 'tool' || message.role === 'function');
-        let stopSequences = chatRequest.stop;
+        // ————————————————————————————————————————————————————————————————
+        // 采样参数拼装：数据驱动放行表 + 纯函数 builder（见 src/util/inference_params.ts）。
+        // 按 (家族, 代次) 裁剪，只下发该家族放行的参数；系统不再无条件注入 temperature/topP 默认。
+        // 组合契约（AD-8）：
+        //  ① maxTokens 已在上方解析终态（含 thinking 预算抬升）。
+        //  ② 固定序合并：buildInferenceParams 先，buildThinking patch 后且覆盖
+        //     （thinking 的 temperature=1 / 删 topP 必须胜过家族裁剪结果）。
+        //  ③ AMF 每 key 单一 producer：buildInferenceParams / buildThinking / 既有 anthropic_beta 互不写同一 key。
+        // ————————————————————————————————————————————————————————————————
+        // modelClass 已在上方 maxTokens 抬升前解析（AD-2 单一入口）。
 
-        const inferenceConfig: any = {
+        const inferenceFragment = buildInferenceParams(modelClass, {
             maxTokens,
-            temperature: chatRequest.temperature || 0.7,
-            topP: chatRequest.top_p || 0.7
-        };
+            temperature: chatRequest.temperature,
+            top_p: chatRequest.top_p,
+            top_k: chatRequest.top_k,
+            stop: chatRequest.stop,
+        });
+        const inferenceConfig: any = inferenceFragment.inferenceConfig;
+        const additionalModelRequestFields: any = inferenceFragment.additionalModelRequestFields;
 
-        if (thinking) {
-            delete inferenceConfig.topP;
-            inferenceConfig.temperature = 1;
-        }
-
-        const additionalModelRequestFields: any = {
-        }
-        if (stopSequences && Array.isArray(stopSequences)) {
-            inferenceConfig.stopSequences = stopSequences.slice(0, 4);
-        }
-        if (thinking) {
-            additionalModelRequestFields.thinking = {
-                type: "enabled",
-                budget_tokens: thinkBudget
-            }
-        }
-
-        if (config.modelId.includes("anthropic")) {
-            // claude-opus-4 and later models deprecated temperature/topP
-            const isOpus4OrLater = config.modelId.includes("claude-opus-4");
-            if (isOpus4OrLater) {
-                delete inferenceConfig.temperature;
+        const thinkingFragment = buildThinking(modelClass, { enabled: thinking, budget: thinkBudget }, maxTokens);
+        if (thinkingFragment.supported) {
+            Object.assign(inferenceConfig, thinkingFragment.inferenceConfig); // temperature=1 覆盖家族裁剪
+            if (thinkingFragment.dropTopP) {
                 delete inferenceConfig.topP;
-            } else {
-                // fix: temperature and top_p cannot both be specified
-                if (chatRequest.top_p && (!chatRequest.temperature)) {
-                    delete inferenceConfig.temperature;
-                } else {
-                    delete inferenceConfig.topP;
-                }
             }
+            if (thinkingFragment.dropTopK) {
+                delete additionalModelRequestFields.top_k; // FR-6：扩展推理禁改 top_k，同传 → 400
+            }
+            Object.assign(additionalModelRequestFields, thinkingFragment.additionalModelRequestFields); // thinking 块
+        }
+
+        // anthropic_beta 单独 producer（AD-8③）：只写 additionalModelRequestFields["anthropic_beta"]，不碰采样参数。保留不动。
+        const modelId = config.modelId || '';
+        if (modelId.includes("anthropic")) {
             const anthropicBetaFeatures = [];
-            if (config.modelId.includes("anthropic.claude-3-7-sonnet")) {
+            if (modelId.includes("anthropic.claude-3-7-sonnet")) {
                 anthropicBetaFeatures.push("output-128k-2025-02-19")
                 anthropicBetaFeatures.push("token-efficient-tools-2025-02-19")
             }
-            if (config.modelId.includes("anthropic.claude-sonnet-4")) {
+            if (modelId.includes("anthropic.claude-sonnet-4")) {
                 anthropicBetaFeatures.push("context-1m-2025-08-07")
             }
-            if (config.modelId.includes("anthropic.claude-sonnet-4-5")) {
+            if (modelId.includes("anthropic.claude-sonnet-4-5")) {
                 anthropicBetaFeatures.push("context-management-2025-06-27")
             }
             additionalModelRequestFields["anthropic_beta"] = anthropicBetaFeatures;
