@@ -1,5 +1,6 @@
 const js = require('@eslint/js');
 const tseslint = require('typescript-eslint');
+const pluginVue = require('eslint-plugin-vue');
 
 module.exports = [
   {
@@ -34,4 +35,10 @@ module.exports = [
       'no-undef': 'off',
     },
   },
+  // 前端块：复用 eslint-plugin-vue 的 flat/recommended 预设（内部已挂好 vue-eslint-parser），
+  // 并用 files 把作用域收敛到 src-frontend，避免预设默认的 **/*.vue 越界命中后端或其它目录。
+  ...pluginVue.configs['flat/recommended'].map((c) => ({
+    ...c,
+    files: ['src-frontend/**/*.{vue,js}'],
+  })),
 ];
