@@ -65,6 +65,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           N: ${{ steps.pr.outputs.number }}
+          # `gh pr checks` reports this job under its job name. Pass it in so the
+          # gate can exclude itself rather than deadlock on its own IN_PROGRESS.
+          SELF_CHECK: ${{ github.job }}
         run: |
           set -euo pipefail
           # GitHub computes `mergeable` asynchronously. Right after a PR opens (or
@@ -107,8 +110,15 @@ jobs:
                                 "--json","name,state"],capture_output=True,text=True)
           if out.returncode != 0 or not out.stdout.strip():
               deny(f"cannot read check status (rc={out.returncode}) — refusing to merge blind")
-          bad = [c for c in json.loads(out.stdout) if c["state"] not in ("SUCCESS","SKIPPED","NEUTRAL")]
+          # Exclude this job's own check. Under the pull_request_target entry
+          # point this workflow is itself a check on the PR, so it observes its
+          # own IN_PROGRESS state and refuses to merge — it would deadlock on
+          # itself, forever, on a PR that is otherwise green.
+          SELF = os.environ.get("SELF_CHECK", "")
+          checks = [c for c in json.loads(out.stdout) if c["name"] != SELF]
+          bad = [c for c in checks if c["state"] not in ("SUCCESS","SKIPPED","NEUTRAL")]
           if bad: deny("checks not green: " + ", ".join(f'{c["name"]}={c["state"]}' for c in bad))
+          if not checks: deny("no checks other than this one — refusing to merge unverified")
           # 5) fail-closed path ownership: PR body must declare what it owns
           owns = []
           for line in (pr.get("body") or "").splitlines():
