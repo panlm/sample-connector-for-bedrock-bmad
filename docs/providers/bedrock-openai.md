@@ -131,21 +131,47 @@ OpenAI SDK as the API key. When `bearerToken` is not supplied, the token is mint
 action that a SigV4 Converse call needs is on the **`bedrock-converse` path, not this one** — do not
 copy it into this provider's IAM table by analogy.
 
+**Why the action is `CallWithBearerToken`, not `InvokeModel`.** These are two *different*
+authorization paths, and which one Bedrock checks depends on how the request is signed — not on
+which model you call:
+
+- **Bare SigV4 Converse call** (what `bedrock-converse` does): the request is signed with SigV4
+  credentials, and Bedrock authorizes it against `bedrock:InvokeModel` /
+  `bedrock:InvokeModelWithResponseStream`.
+- **Minted-bearer-token call** (what this provider does): the credential chain is used first to
+  *mint* a short-lived bearer token, and the actual model call carries that token instead of a
+  SigV4 signature. Bedrock authorizes such a call against **`CallWithBearerToken`** on the
+  endpoint's own namespace — `bedrock:CallWithBearerToken` for `bedrock-runtime`,
+  `bedrock-mantle:CallWithBearerToken` for `bedrock-mantle`. `bedrock:InvokeModel` is neither
+  requested nor sufficient on this path.
+
+This is why granting only the "usual" Bedrock actions (`bedrock:InvokeModel`,
+`bedrock:InvokeModelWithResponseStream`, `bedrock:ListFoundationModels`) to a deployment's role
+still produces a `403` / `401` on `CallWithBearerToken` — adding `CallWithBearerToken` makes the
+same request succeed immediately.
+
 **What is not tested:** the concrete AWS IAM action that the token-minting path
-(`@aws/bedrock-token-generator`) requires. That package is not vendored in this repository and is
-not installed in `node_modules`, so there is no in-repo code from which to read the exact AWS API it
-calls or the action name it needs. It is left as **Not verified** until someone confirms it against
-the dependency source or AWS documentation with a real, permission-scoped credential.
+(`@aws/bedrock-token-generator`) requires **when a static `credentials` block is supplied (tier 2)**.
+That package is not vendored in this repository and is not installed in `node_modules`, so there is
+no in-repo code from which to read the exact AWS API it calls or the action name it needs on that
+path. It is left as **Not verified** until someone confirms it against the dependency source or AWS
+documentation with a real, permission-scoped credential. The **default credential chain (tier 3)**
+path is no longer unverified: a real deployment has confirmed its call action is
+`CallWithBearerToken` (see the table and the trap note below).
 
 | Auth tier | Client-side requirement | AWS-side IAM action |
 | --- | --- | --- |
 | `bearerToken` (tier 1) | A valid, pre-minted Bedrock bearer token. | None minted by this provider — whatever action was needed to produce the token was spent elsewhere. |
 | `credentials` (tier 2) | AWS credentials passed in config. | **Not verified** — the action required by `@aws/bedrock-token-generator` to mint a bearer is not readable from this repo. Do **not** assume `bedrock:InvokeModel`. |
-| default chain (tier 3) | Ambient AWS credentials on the process. | **Not verified** — same as tier 2. |
+| default chain (tier 3) | Ambient AWS credentials on the process. | **Verified (default credential chain + minted bearer token).** The call is authorized against `CallWithBearerToken` on the endpoint's own namespace — **not** `bedrock:InvokeModel`: `endpointType: bedrock-runtime` (default) → **`bedrock:CallWithBearerToken`**; `endpointType: bedrock-mantle` → **`bedrock-mantle:CallWithBearerToken`**. |
 
-> A note the code makes obvious: testing this locally with an admin credential will always succeed
-> and will **never** surface a missing-permission `403`. The IAM action for the minting path must be
-> confirmed with a scoped credential, not inferred.
+> A note the code makes obvious, and a real deployment confirmed: testing this locally with an admin
+> credential and a **bare SigV4** call (e.g. `curl --aws-sigv4`) will always succeed and will
+> **never** surface the missing-permission `403` / `401` — that path is authorized against
+> `bedrock:InvokeModel`, which admin credentials already have. The `CallWithBearerToken` requirement
+> only appears once you deploy with a scoped role (e.g. an EC2 instance role) and let the provider
+> mint a bearer token. Confirm the IAM action with a scoped credential and a real minted-token call,
+> not by inference or local admin testing.
 
 ## Troubleshooting
 
