@@ -54,6 +54,47 @@ The configuration example:
 }
 ```
 
+## Sampling parameters by model family
+
+Sampling parameters (`temperature`, `topP`, `stopSequences`, and family-specific
+fields such as `top_k` / `topK`) are no longer sent unconditionally to every model.
+Because different Bedrock model families and generations accept different parameter
+sets — and rejecting an unsupported one returns a 400 — the request body is now
+trimmed against a per-family allow-list before it is sent.
+
+Only these families are recognized; every other model falls through to a
+conservative `default` branch:
+
+| Family | `inferenceConfig` kept | Notes |
+| ------ | ---------------------- | ----- |
+| Anthropic (Claude Opus 4 and later, including Opus 5) | `maxTokens`, `stopSequences` | `temperature` / `topP` are dropped — this generation no longer accepts them together. |
+| Anthropic (other Claude generations, e.g. Claude 3.x / 3.7 Sonnet / Sonnet 4) | `maxTokens`, `temperature`, `topP`, `stopSequences` | `temperature` and `topP` cannot be sent together; one is kept automatically. |
+| Amazon Nova | `maxTokens`, `temperature`, `topP`, `stopSequences` | |
+| Meta Llama | `maxTokens`, `temperature`, `topP` | `stopSequences` is not sent (not confirmed supported). |
+| **default** (any other family) | `maxTokens` only | All other sampling parameters are dropped. |
+
+**`thinking` is Anthropic-only.** It is now gated by model family: even if `thinking`
+is set to `true` in the configuration, it only takes effect for Anthropic models.
+Nova, Llama, and any `default`-branch model ignore it entirely (no `thinking` field
+and no thinking-related sampling side effects are sent).
+
+**Known limitations**
+
+- The `default` branch keeps `maxTokens` only. Families that do support sampling
+  parameters but are outside the recognized set (for example Amazon Titan, Mistral,
+  Cohere, AI21, DeepSeek) now receive only `maxTokens`; any `temperature` / `topP` /
+  `stopSequences` you configure for them is dropped rather than rejected. This is a
+  deliberate safe default (dropping a parameter is harmless; sending an unsupported
+  one is a 400), but it is a behavior change from previous versions, which passed
+  those parameters through for non-Anthropic models.
+- Family detection reads the provider prefix of the model id (e.g. `anthropic.`,
+  `amazon.`, `meta.`, with an optional region prefix such as `us.`). A model
+  referenced by an inference-profile / custom-model **ARN** (no `provider.` segment)
+  falls through to the `default` branch, so its sampling parameters are trimmed and
+  `thinking` is disabled even when the underlying model is a Claude model. If you use
+  an ARN and need family-specific handling, configure the model with a plain
+  `provider.model` id.
+
 ## Output Results
 
 The output adds a reasoning_content field, consistent with deepseek's output. As follows:

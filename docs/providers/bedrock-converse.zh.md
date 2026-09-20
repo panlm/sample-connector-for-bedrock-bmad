@@ -81,6 +81,38 @@ bedrock-converse 的配置示例如下：
 }
 ```
 
+## 采样参数按模型家族裁剪
+
+采样参数（`temperature`、`topP`、`stopSequences`，以及 `top_k` / `topK` 等家族专属字段）
+不再无条件发给所有模型。Bedrock 上不同模型家族、不同代次接受的参数集不一样，多传一个不支持的
+会返回 400 —— 因此在发送前，请求体会按**家族放行表**做白名单裁剪。
+
+只识别以下家族，其余模型一律走保守的 `default` 分支：
+
+| 家族 | 保留的 `inferenceConfig` 键 | 说明 |
+| ---- | --------------------------- | ---- |
+| Anthropic（Claude Opus 4 及以后，含 Opus 5） | `maxTokens`、`stopSequences` | 不再发送 `temperature` / `topP` —— 该代次已弃用两者同传。 |
+| Anthropic（其余 Claude 代次，如 Claude 3.x / 3.7 Sonnet / Sonnet 4） | `maxTokens`、`temperature`、`topP`、`stopSequences` | `temperature` 与 `topP` 不能同传，会自动二选一保留其一。 |
+| Amazon Nova | `maxTokens`、`temperature`、`topP`、`stopSequences` | |
+| Meta Llama | `maxTokens`、`temperature`、`topP` | 不发送 `stopSequences`（未确认是否支持）。 |
+| **default**（其他任何家族） | 仅 `maxTokens` | 其余采样参数一律裁掉。 |
+
+**`thinking` 仅 Anthropic 生效。** 现在按家族门控：即便配置里把 `thinking` 设为 `true`，
+也只对 Anthropic 模型生效。Nova、Llama 以及走 `default` 分支的模型会完全忽略它（不发送
+`thinking` 字段，也不产生任何 thinking 相关的采样副作用）。
+
+**已知限制**
+
+- `default` 分支只保留 `maxTokens`。那些本身支持采样参数、但不在识别范围内的家族
+  （例如 Amazon Titan、Mistral、Cohere、AI21、DeepSeek）现在只会收到 `maxTokens`；
+  你为它们配置的 `temperature` / `topP` / `stopSequences` 会被裁掉而不是被拒。
+  这是有意为之的安全默认（少传一个参数无害，多传一个不支持的会 400），但相对旧版本是
+  **行为变化** —— 旧版本对非 Anthropic 模型是透传这些参数的。
+- 家族判定读取模型 id 的供应商前缀（如 `anthropic.`、`amazon.`、`meta.`，可带 `us.` 等
+  区域前缀）。用 inference-profile / custom-model **ARN**（不含 `provider.` 段）引用的模型
+  会落到 `default` 分支，因此即便底层是 Claude 模型，其采样参数也会被裁剪、`thinking` 也会
+  被关闭。如果使用 ARN 又需要按家族处理，请改用 `provider.model` 形式的普通 model id 配置。
+
 ## 输出结果
 
 输出中增加了 reasoning_content 字段，与 deepseek 的输出保持一致。如下：
