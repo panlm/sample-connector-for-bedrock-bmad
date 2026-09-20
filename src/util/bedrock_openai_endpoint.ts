@@ -28,12 +28,18 @@ export function bedrockOpenAIEndpointHost(region: string, flavor?: string): stri
  * Build the OpenAI-compatible baseURL to feed to `new OpenAI({ baseURL })`.
  *
  * @param config - runtime config (from modelData.config): reads `regions` and
- *                 `endpointFlavor`. Region resolution is delegated to
- *                 `helper.selectRandomRegion` (AD-7); no hardcoded region literal
- *                 is used as the sole source.
+ *                 `endpointFlavor`.
+ * @param region - optional pre-resolved region. When supplied (the provider
+ *                 resolves region ONCE and passes the SAME value here and to the
+ *                 token util — MR-1 fix), the endpoint and the minted bearer are
+ *                 guaranteed to share a region; a region-scoped bearer would
+ *                 otherwise mismatch the endpoint's region and yield intermittent
+ *                 403s under a multi-region config. When omitted, region is
+ *                 resolved internally via `helper.selectRandomRegion` (AD-7); no
+ *                 hardcoded region literal is used as the sole source.
  */
-export default function buildBedrockOpenAIEndpoint(config: any): string {
-  const region = helper.selectRandomRegion(config && config.regions);
-  const host = bedrockOpenAIEndpointHost(region, config && config.endpointFlavor);
+export default function buildBedrockOpenAIEndpoint(config: any, region?: string): string {
+  const resolvedRegion = region ?? helper.selectRandomRegion(config && config.regions);
+  const host = bedrockOpenAIEndpointHost(resolvedRegion, config && config.endpointFlavor);
   return `https://${host}${OPENAI_PATH_SUFFIX}`;
 }

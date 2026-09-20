@@ -14,6 +14,7 @@ import { ChatRequest, ResponseData } from "../entity/chat_request";
 import AbstractProvider from "./abstract_provider";
 import buildBedrockOpenAIEndpoint from "../util/bedrock_openai_endpoint";
 import resolveBearerToken from "../util/bedrock_token";
+import helper from "../util/helper";
 
 interface ExtendedDelta {
   content?: string;
@@ -35,9 +36,15 @@ export default class BedrockOpenAI extends AbstractProvider {
     const config = this.modelData.config || {};
     const { model } = config;
 
+    // MR-1: resolve region ONCE, then feed the SAME region to both the endpoint
+    // util and the token util. A region-scoped bearer minted for one region must
+    // match the endpoint's region; letting each util call selectRandomRegion
+    // independently could split them under a multi-region config → intermittent 403.
+    const region = helper.selectRandomRegion(config.regions);
+
     // Story 1.1 endpoint util → baseURL; Story 1.2 token util → bearer as apiKey.
-    const baseURL = buildBedrockOpenAIEndpoint(config);
-    const apiKey = await resolveBearerToken(config);
+    const baseURL = buildBedrockOpenAIEndpoint(config, region);
+    const apiKey = await resolveBearerToken(config, region);
 
     // AD-6: cache key includes the bearer. A different bearer on the same baseURL
     // must NOT reuse the client.
