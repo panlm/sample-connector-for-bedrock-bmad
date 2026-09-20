@@ -9,6 +9,7 @@ import helper from "../util/helper";
 import WebResponse from "../util/response";
 import AbstractProvider from "./abstract_provider";
 import AnthropicResponse from '../util/anthropic_response';
+import { resolveFamily, buildInferenceParams } from "../util/inference_params";
 
 /**
 * BedrockConverse Provider uses boto3-converse api to invoke LLM models and support function calling.
@@ -806,6 +807,11 @@ class MessageConverter {
 
     async toPayload(chatRequest: ChatRequest, config: any): Promise<any> {
 
+        // AD-3 同源 modelId：家族判定必须与最终发出的 id 同源。发出 id 在 complete/chat/chatAnthropic
+        // 里被覆盖为 `chatRequest.model_id || this.modelId`（:91-95/:131-135/:502），this.modelId === config.modelId。
+        // 故此处统一用 `chatRequest.model_id || config.modelId` 判家族，而非旧代码直接读 config.modelId。
+        const sourceModelId: string = chatRequest.model_id || (config && config.modelId) || "";
+
         let maxTokens = config && config.maxTokens;
         if (!maxTokens || isNaN(maxTokens)) {
             maxTokens = 2048;
@@ -887,29 +893,28 @@ class MessageConverter {
             }
         }
 
-        if (config.modelId.includes("anthropic")) {
-            // claude-opus-4 and later models deprecated temperature/topP
-            const isOpus4OrLater = config.modelId.includes("claude-opus-4");
-            if (isOpus4OrLater) {
+        // AC1/AD-1：移除旧的内联 Anthropic-only 采样参数裁剪分支（temp/topP 家族裁剪），
+        // 改由下方 buildInferenceParams(inference_params.ts) 按家族/代次白名单统一裁剪。
+        const family = resolveFamily(sourceModelId).family;
+        if (family === "anthropic") {
+            // 接入层约束（非家族裁剪）：Anthropic 不接受 temperature 与 topP 同传，二选一。
+            // 决策表 legacy 放行集同时含 temperature/topP（见 inference_params.ts 注释：同传冲突二选一在接入层解决），
+            // 故在此保留原有二选一逻辑；弃用代次两者随后都会被白名单删除，此处对其为无害 no-op。
+            if (chatRequest.top_p && (!chatRequest.temperature)) {
                 delete inferenceConfig.temperature;
-                delete inferenceConfig.topP;
             } else {
-                // fix: temperature and top_p cannot both be specified
-                if (chatRequest.top_p && (!chatRequest.temperature)) {
-                    delete inferenceConfig.temperature;
-                } else {
-                    delete inferenceConfig.topP;
-                }
+                delete inferenceConfig.topP;
             }
+            // AC2：anthropic_beta 特性追加逻辑保留不被裁（放行集含 anthropic_beta）。特性开关用同源 sourceModelId 判定。
             const anthropicBetaFeatures = [];
-            if (config.modelId.includes("anthropic.claude-3-7-sonnet")) {
+            if (sourceModelId.includes("anthropic.claude-3-7-sonnet")) {
                 anthropicBetaFeatures.push("output-128k-2025-02-19")
                 anthropicBetaFeatures.push("token-efficient-tools-2025-02-19")
             }
-            if (config.modelId.includes("anthropic.claude-sonnet-4")) {
+            if (sourceModelId.includes("anthropic.claude-sonnet-4")) {
                 anthropicBetaFeatures.push("context-1m-2025-08-07")
             }
-            if (config.modelId.includes("anthropic.claude-sonnet-4-5")) {
+            if (sourceModelId.includes("anthropic.claude-sonnet-4-5")) {
                 anthropicBetaFeatures.push("context-management-2025-06-27")
             }
             additionalModelRequestFields["anthropic_beta"] = anthropicBetaFeatures;
@@ -1090,7 +1095,14 @@ class MessageConverter {
             });
         }
 
-        const rtn: any = { messages: alternatingMessages, inferenceConfig, additionalModelRequestFields };
+        // AC1/AC4/AD-2：按家族/代次放行集白名单裁剪顶层键（无论给没给、默认值也被裁；default 仅留 maxTokens）。
+        // 家族判定用同源 sourceModelId（AD-3）；纯函数产物即最终 SDK 请求体字段（AD-8）。
+        const pruned = buildInferenceParams(sourceModelId, { inferenceConfig, additionalModelRequestFields });
+        const rtn: any = {
+            messages: alternatingMessages,
+            inferenceConfig: pruned.inferenceConfig,
+            additionalModelRequestFields: pruned.additionalModelRequestFields,
+        };
 
         if (systemMessages.length > 0) {
             const system = [];
