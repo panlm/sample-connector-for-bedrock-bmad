@@ -121,19 +121,38 @@ client。它总是先拿到一个 bearer token，再把它作为 API key 交给 
 Converse 调用所需的 `bedrock:InvokeModel` action 是 **`bedrock-converse` 路径上的，不是本路径上的**
 —— 不要凭类比把它抄进本 provider 的 IAM 表。
 
-**未实测的：** 铸 token 路径（`@aws/bedrock-token-generator`）实际需要的具体 AWS IAM action。该依赖
-包未在本仓库 vendored，`node_modules` 里也未安装，因此仓库内没有可读的代码来确定它调用的确切 AWS
-API 或所需的 action 名。在有人用真实的、按权限收窄的凭证对着依赖源码或 AWS 官方文档核实之前，一律标
-为 **未实测**。
+**为什么授权走的是 `CallWithBearerToken`，不是 `InvokeModel`。** 这是两条*不同的*授权路径，Bedrock
+检查哪一条取决于请求**怎么签**，而不是你调哪个模型：
+
+- **裸 SigV4 Converse 调用**（`bedrock-converse` 走的这条）：请求用 SigV4 凭证签名，Bedrock 按
+  `bedrock:InvokeModel` / `bedrock:InvokeModelWithResponseStream` 授权。
+- **铸出的 bearer token 调用**（本 provider 走的这条）：先用凭证链*铸*一个短期 bearer token，真正的
+  模型调用带的是这个 token，而不是 SigV4 签名。Bedrock 对这种调用按 endpoint 各自命名空间上的
+  **`CallWithBearerToken`** 授权 —— `bedrock-runtime` 是 `bedrock:CallWithBearerToken`，
+  `bedrock-mantle` 是 `bedrock-mantle:CallWithBearerToken`。`bedrock:InvokeModel` 在本路径上既不会被
+  请求，也不够用。
+
+这就是为什么只给部署角色配「常规」的 Bedrock action（`bedrock:InvokeModel`、
+`bedrock:InvokeModelWithResponseStream`、`bedrock:ListFoundationModels`）仍会在 `CallWithBearerToken`
+上得到 `403` / `401` —— 补上 `CallWithBearerToken` 后同一请求立即成功。
+
+**未实测的：** 铸 token 路径（`@aws/bedrock-token-generator`）**在配置里传入静态 `credentials`（第 2
+档）时**实际需要的具体 AWS IAM action。该依赖包未在本仓库 vendored，`node_modules` 里也未安装，因此
+仓库内没有可读的代码来确定它在这条路径上调用的确切 AWS API 或所需的 action 名。在有人用真实的、按权限
+收窄的凭证对着依赖源码或 AWS 官方文档核实之前，一律标为 **未实测**。而**默认凭证链（第 3 档）**这条
+路径已不再是未实测：一次真实部署已确认其调用 action 是 `CallWithBearerToken`（见下表与下方陷阱说明）。
 
 | 认证档 | 客户端侧需要 | AWS 侧 IAM action |
 | --- | --- | --- |
 | `bearerToken`（第 1 档） | 一个有效的、预先铸好的 Bedrock bearer token。 | 本 provider 不铸 token —— 铸它所需的 action 已在别处付出。 |
 | `credentials`（第 2 档） | 配置里传入的 AWS 凭证。 | **未实测** —— `@aws/bedrock-token-generator` 铸 bearer 所需的 action 无法从本仓库读出。**不要**假设是 `bedrock:InvokeModel`。 |
-| 默认凭证链（第 3 档） | 进程上的环境 AWS 凭证。 | **未实测** —— 同第 2 档。 |
+| 默认凭证链（第 3 档） | 进程上的环境 AWS 凭证。 | **已实测（默认凭证链 + 铸出的 bearer token）。** 授权走的是 endpoint 各自命名空间上的 `CallWithBearerToken`，**不是** `bedrock:InvokeModel`：`endpointType: bedrock-runtime`（默认）→ **`bedrock:CallWithBearerToken`**；`endpointType: bedrock-mantle` → **`bedrock-mantle:CallWithBearerToken`**。 |
 
-> 代码已经点明的一点：本机用管理员凭证测试永远会成功，**永远不会**暴露缺权限的 `403`。铸 token
-> 路径的 IAM action 必须用收窄权限的凭证核实，不能靠推断。
+> 代码已经点明、且一次真实部署已证实的一点：本机用管理员凭证做**裸 SigV4** 调用（例如
+> `curl --aws-sigv4`）永远会成功，**永远不会**暴露缺权限的 `403` / `401` —— 那条路径按
+> `bedrock:InvokeModel` 授权，而管理员凭证本就有这个权限。`CallWithBearerToken` 的要求只有在你用一个
+> 收窄权限的角色（例如 EC2 instance role）部署、并让 provider 去铸 bearer token 时才会暴露。IAM
+> action 必须用收窄权限的凭证 + 真实的铸 token 调用来核实，不能靠推断，也不能靠本机管理员裸测。
 
 ## 常见报错与排查
 
