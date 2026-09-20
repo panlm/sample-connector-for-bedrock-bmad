@@ -1,5 +1,6 @@
 const js = require('@eslint/js');
 const tseslint = require('typescript-eslint');
+const pluginVue = require('eslint-plugin-vue');
 
 module.exports = [
   {
@@ -32,6 +33,19 @@ module.exports = [
       // TypeScript 编译器已负责这两类检查，core 规则在 TS 上会误报（类型引用、重载签名等），按标准做法关闭。
       'no-unused-vars': 'off',
       'no-undef': 'off',
+    },
+  },
+  // 前端 .vue：展开 eslint-plugin-vue 的 flat/recommended 社区 preset（自带 files:['**/*.vue'] 与 vue-eslint-parser）。
+  ...pluginVue.configs['flat/recommended'],
+  // 前端 .js：用 @eslint/js recommended（默认 espree parser），仅限 src-frontend/。
+  {
+    files: ['src-frontend/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+    },
+    rules: {
+      ...js.configs.recommended.rules,
     },
   },
 ];

@@ -6,7 +6,8 @@
   "packageManager": "pnpm@10.34.5",
   "scripts": {
     "test": "vitest run",
-    "lint": "eslint .",
+    "lint": "eslint src",
+    "lint:ui": "eslint src-frontend",
     "start": "npx ts-node -T src/index.ts",
     "dev": "nodemon src/index.ts",
     "dev-ui": "vite",
