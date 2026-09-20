@@ -120,11 +120,43 @@ jobs:
           if bad: deny("checks not green: " + ", ".join(f'{c["name"]}={c["state"]}' for c in bad))
           if not checks: deny("no checks other than this one — refusing to merge unverified")
           # 5) fail-closed path ownership: PR body must declare what it owns
-          owns = []
-          for line in (pr.get("body") or "").splitlines():
-              if line.strip().lower().startswith("auto-merge-paths:"):
-                  owns = [p.strip() for p in line.split(":",1)[1].split(",") if p.strip()]
-          if not owns: deny("PR body has no `Auto-merge-paths:` declaration")
+          #
+          # The declaration is matched permissively on purpose. Being strict here
+          # bought nothing and cost real work: two run-4 PRs declared correctly and
+          # still stalled, because the author copied the line out of a fenced
+          # example and decorated it —
+          #   #19  `Auto-merge-paths: package.json`   (wrapped in backticks)
+          #   #16  ### Auto-merge-paths               (heading + fenced path list)
+          # Relaxing the *parse* cannot approve anything wrong: whatever is found
+          # still has to cover every changed file in the check below, or we deny.
+          def _undecorate(s):
+              return s.strip().lstrip("#>*-+ \t").strip().strip("`").strip()
+
+          body_lines = (pr.get("body") or "").splitlines()
+          owns, found_marker = [], False
+          for i, raw in enumerate(body_lines):
+              line = _undecorate(raw)
+              if not line.lower().startswith("auto-merge-paths"): continue
+              found_marker = True
+              rest = line.split(":", 1)[1] if ":" in line else ""
+              if rest.strip():
+                  owns = [p.strip().strip("`") for p in rest.split(",") if p.strip().strip("`")]
+                  break
+              # Heading form: collect paths from the lines that follow, skipping
+              # blanks and fence markers, stopping at the next heading/quote.
+              for nxt in body_lines[i+1:]:
+                  t = nxt.strip()
+                  if not t or t.startswith("```"): continue
+                  if t.startswith("#") or t.startswith(">"): break
+                  cand = [p.strip().strip("`") for p in _undecorate(nxt).split(",")]
+                  cand = [p for p in cand if p and "/" in p or p.endswith((".json",".js",".ts",".md",".yml",".yaml"))]
+                  if not cand: break
+                  owns += cand
+              break
+          if not owns:
+              deny("PR body has no usable `Auto-merge-paths:` declaration"
+                   + (" — found the marker but no paths after it" if found_marker
+                      else " — expected a line `Auto-merge-paths: <glob>, <glob>`"))
           # Path-aware glob: `*` must NOT cross a directory separator, otherwise a
           # declaration that reads as narrow (`src/*`) silently matches `src/a/b/c.ts`
           # and the ownership gate stops being a concurrency boundary at all.
