@@ -202,6 +202,14 @@ export default class PGClient {
 
   public async deleteMulti(table: string, conditions: any) {
     conditions = conditions || {};
+    // deleteMulti 拒绝空/缺失 where：这里绝不能兜底成 "1=1"（对 DELETE 等于删全表）。
+    // 坏 where 一律在拼 SQL 之前抛错拒绝执行。
+    if (typeof conditions.where !== "string" || conditions.where.trim() === "") {
+      throw new Error(
+        `deleteMulti("${table}") refused: a non-empty "where" condition is required, ` +
+        `but got ${JSON.stringify(conditions.where)}. Refusing to run an unbounded DELETE.`
+      );
+    }
     const sql = `delete from ${table} where ${conditions.where} `;
     const { rowCount } = await this.query(sql, conditions.params);
     return rowCount > 0;
