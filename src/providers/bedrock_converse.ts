@@ -9,7 +9,7 @@ import helper from "../util/helper";
 import WebResponse from "../util/response";
 import AbstractProvider from "./abstract_provider";
 import AnthropicResponse from '../util/anthropic_response';
-import { resolveFamily, buildInferenceParams } from "../util/inference_params";
+import { resolveFamily, familySupportsThinking, buildInferenceParams } from "../util/inference_params";
 
 /**
 * BedrockConverse Provider uses boto3-converse api to invoke LLM models and support function calling.
@@ -812,6 +812,12 @@ class MessageConverter {
         // 故此处统一用 `chatRequest.model_id || config.modelId` 判家族，而非旧代码直接读 config.modelId。
         const sourceModelId: string = chatRequest.model_id || (config && config.modelId) || "";
 
+        // AD-6 固定顺序 resolveFamily→查表→(thinking 且支持) thinking 约束→裁剪：家族判定必须在
+        // thinking 约束之前完成。thinking 走分家族独立路径（AD-5/FR-7），仅支持它的家族（Anthropic）
+        // 生效；不支持家族即便带 thinking 意图也不进入 thinking 的任何 inferenceConfig/请求体改写。
+        const family = resolveFamily(sourceModelId).family;
+        const supportsThinking = familySupportsThinking(family);
+
         let maxTokens = config && config.maxTokens;
         if (!maxTokens || isNaN(maxTokens)) {
             maxTokens = 2048;
@@ -838,6 +844,11 @@ class MessageConverter {
             thinking = true;
             thinkBudget = config.thinkBudget;
         }
+
+        // AD-5/FR-7 分家族门控：thinking 只在支持它的家族（Anthropic）生效。不支持家族（nova/llama/default）
+        // 即便带 thinking 意图也在此归零 —— 后续 budget 约束、inferenceConfig 改写（删 topP/temp=1）、
+        // 注入 Anthropic thinking 结构一律不触发，其请求体不含任何 thinking 副作用。数值与逻辑不变，仅触发条件从"无条件"改为"仅支持家族"。
+        thinking = thinking && supportsThinking;
 
         if (thinking) {
             if (!thinkBudget || thinkBudget < 1024) {
@@ -895,15 +906,19 @@ class MessageConverter {
 
         // AC1/AD-1：移除旧的内联 Anthropic-only 采样参数裁剪分支（temp/topP 家族裁剪），
         // 改由下方 buildInferenceParams(inference_params.ts) 按家族/代次白名单统一裁剪。
-        const family = resolveFamily(sourceModelId).family;
+        // family 已在上方（thinking 约束之前）按 AD-6 固定顺序解析。
         if (family === "anthropic") {
             // 接入层约束（非家族裁剪）：Anthropic 不接受 temperature 与 topP 同传，二选一。
             // 决策表 legacy 放行集同时含 temperature/topP（见 inference_params.ts 注释：同传冲突二选一在接入层解决），
             // 故在此保留原有二选一逻辑；弃用代次两者随后都会被白名单删除，此处对其为无害 no-op。
-            if (chatRequest.top_p && (!chatRequest.temperature)) {
-                delete inferenceConfig.temperature;
-            } else {
-                delete inferenceConfig.topP;
+            // AC2/AD-6：thinking 开启时它已独占决定 temp/topP（temperature=1、删 topP），"二选一"此时不生效、
+            // 不得二次改写 thinking 已定字段（否则会误删 thinking 定的 temperature=1）。
+            if (!thinking) {
+                if (chatRequest.top_p && (!chatRequest.temperature)) {
+                    delete inferenceConfig.temperature;
+                } else {
+                    delete inferenceConfig.topP;
+                }
             }
             // AC2：anthropic_beta 特性追加逻辑保留不被裁（放行集含 anthropic_beta）。特性开关用同源 sourceModelId 判定。
             const anthropicBetaFeatures = [];
