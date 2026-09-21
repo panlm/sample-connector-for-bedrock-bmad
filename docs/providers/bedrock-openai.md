@@ -146,29 +146,52 @@ The default is **not** a whitelist check: any value other than
 
 ## IAM prerequisites
 
-> ⚠️ **The required IAM actions have not been empirically verified in this
-> round, and are therefore marked "not verified" below.** The action needed by
-> the **mint-a-token** path is **not** the same as the action for a raw SigV4
-> Bedrock call. This provider does not construct an AWS SDK client and never
-> calls `InvokeModel`; the token is minted through the third-party
-> `@aws/bedrock-token-generator` library, and the repository's tests mock that
-> library and every AWS SDK client. There is therefore no in-repo evidence of
-> the real authorization actions. **Do not** infer the required action from
-> "Bedrock calls generally need `InvokeModel`" — a wrong entry here means
-> anyone configuring permissions from this doc gets a 403, and it will not
-> reproduce when testing locally with admin credentials.
+> ✅ **The runtime invocation permission is now empirically verified.** The
+> bearer this provider sends must carry **`{service}:CallWithBearerToken`** —
+> **`bedrock:CallWithBearerToken`** when `endpointFlavor` is `bedrock-runtime`,
+> **`bedrock-mantle:CallWithBearerToken`** when it is `bedrock-mantle`. It is
+> **not** the SigV4 `bedrock:InvokeModel` action.
+>
+> **Why `CallWithBearerToken`, not `InvokeModel`.** This provider never
+> constructs an AWS SDK client and never calls `InvokeModel`. It mints a
+> short-lived bearer from the credential chain via the third-party
+> `@aws/bedrock-token-generator` library and sends it as the OpenAI `apiKey` to
+> the `/openai/v1` endpoint. **When a request is authorized with a bearer token,
+> authorization is evaluated against the `CallWithBearerToken` action, not the
+> SigV4 `InvokeModel` action.** "Bedrock calls need `InvokeModel`" is true only
+> for **raw SigV4** and does not apply on this provider's path. The service
+> prefix (`bedrock:` vs `bedrock-mantle:`) is not a typo — it is dictated by the
+> endpoint's own service namespace: `bedrock-runtime` → `bedrock:`,
+> `bedrock-mantle` → `bedrock-mantle:`.
+>
+> ⚠️ **This error does not reproduce locally with admin credentials.** Testing
+> with an admin identity via `curl --aws-sigv4` exercises the raw SigV4 path,
+> which always returns `200` — so the difference is invisible on a local box.
+> Only a real deployment that mints from the default credential chain (e.g. an
+> EC2 instance role, the recommended production shape) surfaces the
+> `CallWithBearerToken` 403. An instance role scoped to `bedrock:InvokeModel` /
+> `bedrock:InvokeModelWithResponseStream` — a natural guess — is **not** enough.
+>
+> The two static-credential entries below (① explicit `bearerToken`, ② static
+> `credentials`) are **still not empirically verified in this round** and remain
+> marked accordingly. **Do not** infer them from the runtime result above.
 
 | Auth path | Trigger | Required IAM action | Status |
 | --- | --- | --- | --- |
-| Mint token (② `credentials` / ③ default chain) | Bearer minted from AWS credentials via `@aws/bedrock-token-generator` | Action(s) required to mint a bearer (**not** `bedrock:InvokeModel`) | **Not verified** |
+| Mint token — ③ default credential chain | Bearer minted from the default chain (e.g. an EC2 instance role) via `@aws/bedrock-token-generator`, then used to invoke | The identity behind the default chain must be allowed `{service}:CallWithBearerToken` (**not** `bedrock:InvokeModel`); service prefix follows `endpointFlavor` — see the two inference rows below | **Verified** |
+| Mint token — ② static `credentials` | Bearer minted from an explicit `credentials` entry | Action(s) required to mint from static credentials (**not** `bedrock:InvokeModel`) | **Not verified** (no evidence this round) |
+| Bearer used for inference — `endpointFlavor: bedrock-runtime` (default) | A bearer is sent to `https://bedrock-runtime.{region}.amazonaws.com/openai/v1` | `bedrock:CallWithBearerToken` | **Verified** |
+| Bearer used for inference — `endpointFlavor: bedrock-mantle` | A bearer is sent to `https://bedrock-mantle.{region}.api.aws/openai/v1` | `bedrock-mantle:CallWithBearerToken` | **Verified** |
 | Raw SigV4 (this provider does **not** use it — shown for contrast only) | Direct SigV4-signed call to the Bedrock runtime API | Runtime-call action(s) (e.g. the `bedrock:InvokeModel*` family) | **Not verified** (and not on this provider's path) |
-| Bearer used against the OpenAI-compatible endpoint for inference | Any of ①②③ obtains a bearer, then sends a request | Permission the bearer must carry to invoke | **Not verified** |
 | ① Explicit `bearerToken` | An already-minted bearer is supplied | No AWS credentials involved at runtime; minting that bearer happens outside BRConnector | **Not verified / N/A at runtime** |
 
-To resolve these entries, verify the minting action against the
+The runtime invocation action is now settled (`{service}:CallWithBearerToken`,
+prefix per `endpointFlavor`). The two remaining **Not verified** entries — the
+action to mint from static `credentials`, and the ① explicit `bearerToken` case
+— have no empirical evidence in this round; verify them against the
 `@aws/bedrock-token-generator` 1.1.0 and the AWS Bedrock API-key / bearer
-documentation, or keep them marked "not verified." Do not fill them in by
-inference.
+documentation before relying on them, or keep them marked "not verified." Do not
+fill them in by inference.
 
 ## Troubleshooting
 
@@ -181,7 +204,11 @@ Only failure modes with a mechanism in the code are listed here.
   split and yields intermittent 403s.
 - **401/403 with no fallback.** A bearer/auth failure is a hard failure —
   there is no silent SigV4 retry. Investigate the bearer and its IAM
-  permissions directly.
+  permissions directly. A `403 ... not authorized to perform:
+  bedrock:CallWithBearerToken` (or `bedrock-mantle:CallWithBearerToken` on the
+  `bedrock-mantle` flavor) means the calling identity lacks the
+  `{service}:CallWithBearerToken` action — **not** `bedrock:InvokeModel`. See
+  [IAM prerequisites](#iam-prerequisites).
 - **Requests hitting the wrong endpoint.** Check `endpointFlavor`. A typo, or
   the wrong key name (`endpointType`), is silently ignored and the request
   goes to the default `bedrock-runtime` host.
