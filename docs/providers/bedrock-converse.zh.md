@@ -81,6 +81,50 @@ bedrock-converse 的配置示例如下：
 }
 ```
 
+## 采样参数按模型家族裁剪
+
+采样参数（`temperature`、`topP`、`stopSequences`）不再无条件发给所有模型。Bedrock 上不同
+模型家族、不同代次接受的参数集不一样，多传一个不支持的会返回 400 —— 因此在发送前，请求体会按
+**家族放行表**做白名单裁剪。
+
+只识别以下家族，其余模型一律走保守的 `default` 分支：
+
+| 家族 | 保留的 `inferenceConfig` 键 | 说明 |
+| ---- | --------------------------- | ---- |
+| Anthropic（Claude Opus 4 及以后，含 Opus 5） | `maxTokens`、`stopSequences` | 该代次 `temperature` 与 `topP` 均被放行表裁掉 —— 两者都不发送。 |
+| Anthropic（其余 Claude 代次，如 Claude 3.x / 3.7 Sonnet / Sonnet 4） | `maxTokens`、`temperature`、`topP`、`stopSequences` | `temperature` 与 `topP` 不能同传。默认保留 `temperature`、删除 `topP`；仅当请求只传了 `top_p` 而未传 `temperature` 时才保留 `topP`。 |
+| Amazon Nova | `maxTokens`、`temperature`、`topP`、`stopSequences` | |
+| Meta Llama | `maxTokens`、`temperature`、`topP` | 不发送 `stopSequences`（未确认是否支持）。 |
+| **default**（其他任何家族） | 仅 `maxTokens` | 其余采样参数一律裁掉。 |
+
+**`thinking` 仅 Anthropic 生效。** 现在按家族门控：即便配置里把 `thinking` 设为 `true`，
+也只对 Anthropic 模型生效。Nova、Llama 以及走 `default` 分支的模型会完全忽略它（不发送
+`thinking` 字段，也不产生任何 thinking 相关的采样副作用）。
+
+**已知限制**
+
+- `default` 分支只保留 `maxTokens`。那些本身支持采样参数、但不在识别范围内的家族
+  （例如 Amazon Titan、Mistral、Cohere、AI21、DeepSeek）现在只会收到 `maxTokens`；
+  你为它们配置的 `temperature` / `topP` / `stopSequences` 会被裁掉而不是被拒。
+  这是有意为之的安全默认（少传一个参数无害，多传一个不支持的会 400），但相对旧版本是
+  **行为变化** —— 旧版本对非 Anthropic 模型是透传这些参数的。
+- 家族判定依据模型 id 中**点分隔的 `provider.` 段**（`anthropic.`、`amazon.`、`meta.`）。
+  供应商既可以在 id 开头，也可以前面带任意点分隔前缀 —— `us.` 这类区域前缀只是其中一种，
+  并非唯一允许的前缀。
+- 也正因为判定依据的是这个点分隔的 `provider.` 段，inference-profile **ARN**（其 id 里嵌了
+  这样一段，如
+  `arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus-4-1-20250805-v1:0`）
+  **会**被按家族识别（此处是 Anthropic），走全套家族处理、`thinking` 照常开启。只有**不含**
+  点分隔 `provider.` 段的 ARN —— 即 foundation-model / provisioned-model / custom-model ARN，
+  供应商名前面是 `/` 而非 `.`（如
+  `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20240620-v1:0`）——
+  才会落到 `default` 分支，此时即便底层是 Claude 模型，其采样参数也会被裁到只剩 `maxTokens`、
+  `thinking` 也会被关闭。如果需要按家族处理，请使用 `provider.model` 形式的普通 model id，
+  或使用 inference-profile ARN，而不要用 foundation-model / custom-model ARN。
+- 家族放行表为若干家族专属字段（Anthropic 的 `top_k`、Nova 的 `topK`）预留了位置，但当前
+  connector 并不会把它们写进 `additionalModelRequestFields` —— 目前只有 `thinking` 与
+  `anthropic_beta` 会经该字段发送。因此配置 `top_k` / `topK` 暂时不会产生任何可观察的效果。
+
 ## 输出结果
 
 输出中增加了 reasoning_content 字段，与 deepseek 的输出保持一致。如下：
