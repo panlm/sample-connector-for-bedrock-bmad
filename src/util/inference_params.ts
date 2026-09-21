@@ -136,6 +136,18 @@ export function resolveFamily(modelId: string | null | undefined): ResolvedFamil
     return { family: rule.family, generation: rule.generation };
 }
 
+/**
+ * thinking 分家族门控（AD-5/FR-7）：thinking 是 Anthropic 形状字段
+ * `{type:"enabled",budget_tokens:N}`，只应在支持它的家族出现。
+ * 以决策表放行集为唯一事实源（AD-1）：某家族任一代次的 `additionalModelRequestFieldsAllow`
+ * 含 `thinking` 即视为支持。这样新增/调整支持家族只改决策表一行数据，接入层无需再动。
+ */
+export function familySupportsThinking(family: string): boolean {
+    return FAMILY_RULES.some(
+        (rule) => rule.family === family && rule.additionalModelRequestFieldsAllow.includes('thinking'),
+    );
+}
+
 /** 白名单裁剪：只保留放行集内的顶层键，其余一律删除（无论给没给）。不进嵌套（AD-2）。 */
 function pruneByWhitelist(
     obj: Record<string, unknown> | undefined,

@@ -1,4 +1,28 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// —— 边界 mock：在 import 目标模块前 hoist 生效（照 test/nova_canvas.test.ts 范式），隔离外部依赖、抓 SDK 构造调用 ——
+vi.mock('../src/config', () => ({ default: {} }));
+vi.mock('../src/service/model', () => ({ default: {} }));
+vi.mock('nodemailer', () => ({ default: { createTransport: vi.fn() } }));
+vi.mock('@aws-sdk/client-s3', () => ({ S3Client: vi.fn(), GetObjectCommand: vi.fn(), PutObjectCommand: vi.fn() }));
+vi.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: vi.fn() }));
+vi.mock('../src/util/logger', () => ({ default: { info: vi.fn(), error: vi.fn(), warn: vi.fn() } }));
+// BedrockRuntimeClient.send 返回固定响应；ConverseCommand/ConverseStreamCommand 为 vi.fn，用于抓构造入参（AC5）。
+vi.mock('@aws-sdk/client-bedrock-runtime', () => ({
+    // 用普通函数（非箭头）以便 `new BedrockRuntimeClient(...)` 可构造；返回带 send 的 stub 实例。
+    BedrockRuntimeClient: vi.fn(function () {
+        return {
+            send: vi.fn().mockResolvedValue({
+                output: { message: { content: [{ text: 'ok' }] } },
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                metrics: { latencyMs: 1 },
+                $metadata: { requestId: 'req-1' },
+            }),
+        };
+    }),
+    ConverseCommand: vi.fn(),
+    ConverseStreamCommand: vi.fn(),
+}));
 
 // 纯函数直测（照 test/nova_canvas.test.ts 范式）：inference_params 无 SDK 依赖，直接 import 断言返回值。
 import {
@@ -7,6 +31,9 @@ import {
     buildInferenceParams,
     FAMILY_RULES,
 } from '../src/util/inference_params';
+
+import BedrockConverse from '../src/providers/bedrock_converse';
+import { ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 
 describe('parseModelId', () => {
     it('剥离 region 前缀，提取 provider 与 core', () => {
@@ -181,5 +208,164 @@ describe('FAMILY_RULES —— 数据结构不变量（AD-9）', () => {
     it('default 行的 inferenceConfig 放行集只含 maxTokens', () => {
         const def = FAMILY_RULES.find((r) => r.family === 'default');
         expect(def?.inferenceConfigAllow).toEqual(['maxTokens']);
+    });
+});
+
+// —— SDK 级裁剪矩阵（AC3/AC4/AC5）：驱动真实 BedrockConverse.complete，抓 ConverseCommand 构造入参断言 ——
+// 断言对象是 `new ConverseCommand(input)` 的 input（真实 SDK 请求体），非内部中间变量。
+// 每个用例可"改坏→变红"：Nova 退透传 / default 放 temp / 代次退 opus-4 / 家族判定改回 config.modelId。
+describe('bedrock_converse.toPayload 接入决策表 —— SDK 请求体裁剪矩阵', () => {
+    // 驱动 complete() 非流式路径 → completeSync → new ConverseCommand(input)。performanceMode 跳过 DB 落库。
+    async function capture(opts: {
+        modelId: string;
+        configModelId?: string;
+        temperature?: number;
+        top_p?: number;
+        stop?: string[];
+    }): Promise<any> {
+        const provider = new BedrockConverse();
+        provider.setModelData({
+            // config.modelId 与 chatRequest.model_id 可不同（验 AD-3 同源判定）。
+            config: { modelId: opts.configModelId ?? opts.modelId, regions: 'us-east-1', bearerToken: 'test-token' },
+            price_in: 0,
+            price_out: 0,
+        });
+        provider.setKeyData({ id: 1, month_fee: 0, month_quota: 1, balance: 0, total_fee: 0 });
+
+        const chatRequest: any = {
+            model: 'unit-test-model',
+            model_id: opts.modelId,
+            messages: [{ role: 'user', content: 'hi' }],
+            stream: false,
+        };
+        if (opts.temperature !== undefined) chatRequest.temperature = opts.temperature;
+        if (opts.top_p !== undefined) chatRequest.top_p = opts.top_p;
+        if (opts.stop !== undefined) chatRequest.stop = opts.stop;
+
+        const ctx: any = { performanceMode: true, status: 0, set: vi.fn(), logger: { error: vi.fn() } };
+        await provider.complete(chatRequest, '', ctx);
+
+        expect(ConverseCommand).toHaveBeenCalledTimes(1);
+        return (ConverseCommand as any).mock.calls[0][0];
+    }
+
+    beforeEach(() => {
+        (ConverseCommand as any).mockClear();
+    });
+
+    // —— Anthropic 弃用代次（Opus 5，新增覆盖）——
+    it('Anthropic 弃用代次 opus-5 · 给 temp+topP+stop → 二者都不在（白名单删），保留 maxTokens/stopSequences', async () => {
+        const input = await capture({
+            modelId: 'us.anthropic.claude-opus-5-20260101-v1:0',
+            temperature: 0.5,
+            top_p: 0.9,
+            stop: ['STOP'],
+        });
+        expect(input.inferenceConfig).not.toHaveProperty('temperature');
+        expect(input.inferenceConfig).not.toHaveProperty('topP');
+        expect(input.inferenceConfig.maxTokens).toBeDefined();
+        expect(input.inferenceConfig.stopSequences).toEqual(['STOP']);
+        // AC2：anthropic_beta 保留不被裁（opus-5 无 sonnet 特性 → 空数组）。
+        expect(input.additionalModelRequestFields).toHaveProperty('anthropic_beta');
+    });
+
+    it('Anthropic 弃用代次 opus-5 · 没给 → inferenceConfig 仅 maxTokens（默认 temp/topP 也被裁）', async () => {
+        const input = await capture({ modelId: 'us.anthropic.claude-opus-5-20260101-v1:0' });
+        expect(input.inferenceConfig).toEqual({ maxTokens: expect.any(Number) });
+    });
+
+    // —— Anthropic 旧代次（Opus 4.x，回归）——
+    it('Anthropic opus-4.x · 给 temp+topP → 二者都不在（回归：弃用代次删 temp/topP）', async () => {
+        const input = await capture({
+            modelId: 'anthropic.claude-opus-4-1-20250805-v1:0',
+            temperature: 0.3,
+            top_p: 0.8,
+        });
+        expect(input.inferenceConfig).not.toHaveProperty('temperature');
+        expect(input.inferenceConfig).not.toHaveProperty('topP');
+        expect(input.inferenceConfig.maxTokens).toBeDefined();
+    });
+
+    it('Anthropic opus-4.x · 没给 → inferenceConfig 仅 maxTokens', async () => {
+        const input = await capture({ modelId: 'anthropic.claude-opus-4-20250514-v1:0' });
+        expect(input.inferenceConfig).toEqual({ maxTokens: expect.any(Number) });
+    });
+
+    // —— Nova ——
+    it('Nova · 给 temp+topP+stop → 通用采样键保留、无 anthropic_beta/thinking 透传', async () => {
+        const input = await capture({
+            modelId: 'amazon.nova-pro-v1:0',
+            temperature: 0.4,
+            top_p: 0.6,
+            stop: ['END'],
+        });
+        expect(input.inferenceConfig).toEqual({
+            maxTokens: expect.any(Number),
+            temperature: 0.4,
+            topP: 0.6,
+            stopSequences: ['END'],
+        });
+        // 非 Anthropic：anthropic_beta 不应出现（証伪：家族判定退回或漏裁 → 变红）。
+        expect(input.additionalModelRequestFields).not.toHaveProperty('anthropic_beta');
+        expect(input.additionalModelRequestFields).toEqual({});
+    });
+
+    it('Nova · 没给 → 保留默认 temp/topP（Nova 放行），additionalModelRequestFields 为空', async () => {
+        const input = await capture({ modelId: 'amazon.nova-lite-v1:0' });
+        expect(input.inferenceConfig).toHaveProperty('temperature');
+        expect(input.inferenceConfig).toHaveProperty('topP');
+        expect(input.additionalModelRequestFields).toEqual({});
+    });
+
+    // —— Llama ——
+    it('Llama · 给 temp+topP+stop → 保留 temp/topP，stopSequences 被裁（Llama 不放行）', async () => {
+        const input = await capture({
+            modelId: 'meta.llama3-70b-instruct-v1:0',
+            temperature: 0.5,
+            top_p: 0.7,
+            stop: ['X'],
+        });
+        expect(input.inferenceConfig).toHaveProperty('temperature');
+        expect(input.inferenceConfig).toHaveProperty('topP');
+        expect(input.inferenceConfig).not.toHaveProperty('stopSequences');
+        expect(input.additionalModelRequestFields).toEqual({});
+    });
+
+    it('Llama · 没给 → inferenceConfig 无 stopSequences，无家族专属键', async () => {
+        const input = await capture({ modelId: 'meta.llama3-8b-instruct-v1:0' });
+        expect(input.inferenceConfig).not.toHaveProperty('stopSequences');
+        expect(input.additionalModelRequestFields).toEqual({});
+    });
+
+    // —— 未知家族 → default 兜底 ——
+    it('未知家族 · 给 temp+topP+stop → inferenceConfig 仅 maxTokens（証伪：default 放 temp 即变红）', async () => {
+        const input = await capture({
+            modelId: 'cohere.command-r-v1:0',
+            temperature: 0.9,
+            top_p: 0.9,
+            stop: ['Z'],
+        });
+        expect(input.inferenceConfig).toEqual({ maxTokens: expect.any(Number) });
+        expect(input.additionalModelRequestFields).toEqual({});
+    });
+
+    it('未知家族 · 没给 → inferenceConfig 仅 maxTokens', async () => {
+        const input = await capture({ modelId: 'cohere.command-r-v1:0' });
+        expect(input.inferenceConfig).toEqual({ maxTokens: expect.any(Number) });
+    });
+
+    // —— AD-3 同源 modelId：家族判定用 chatRequest.model_id（发出 id），而非 config.modelId ——
+    it('同源判定：config.modelId=opus(会删 temp/topP) 但 model_id=Nova → 按 Nova 保留 temp/topP，且发出 id 同为 Nova', async () => {
+        const input = await capture({
+            configModelId: 'anthropic.claude-opus-4-1-20250805-v1:0',
+            modelId: 'amazon.nova-pro-v1:0',
+            temperature: 0.4,
+            top_p: 0.6,
+        });
+        // 发出 id 与判定同源（AD-3）。
+        expect(input.modelId).toBe('amazon.nova-pro-v1:0');
+        // 按 Nova 家族保留（証伪：若按 config.modelId=opus 判定，temp/topP 会被删 → 变红）。
+        expect(input.inferenceConfig.temperature).toBe(0.4);
+        expect(input.inferenceConfig.topP).toBe(0.6);
     });
 });
