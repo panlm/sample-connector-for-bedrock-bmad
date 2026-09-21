@@ -26,6 +26,7 @@ import AzureOpenAI from "./azure_openai"
 import AzureOpenAIImage from "./azure_openai_image"
 import BedrockAgent from "./bedrock_agent";
 import GeminiConverse from "./gemini_converse";
+import BedrockOpenAI from "./bedrock_openai";
 
 class Provider {
     constructor() {
@@ -52,6 +53,7 @@ class Provider {
         this["azure-openai"] = new AzureOpenAI();
         this["azure-openai-image"] = new AzureOpenAIImage();
         this["gemini-converse"] = new GeminiConverse();
+        this["bedrock-openai"] = new BedrockOpenAI();
     }
 
     async initForEmbeddings(ctx: any) {
