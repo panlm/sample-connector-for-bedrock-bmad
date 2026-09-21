@@ -30,16 +30,22 @@ function resolveExpiresInSeconds(config: any): number {
  *   ② explicit `config.credentials`  → mint with those credentials.
  *   ③ default credential chain       → mint via the default provider.
  *
+ * @param region - optional pre-resolved region. When supplied (the provider
+ *                 resolves region ONCE and passes the SAME value here and to the
+ *                 endpoint util — MR-1 fix), the minted region-scoped bearer is
+ *                 guaranteed to match the endpoint's region. When omitted, region
+ *                 is resolved internally via `helper.selectRandomRegion` (AD-7),
+ *                 never hardcoded.
  * @returns the bearer string; it is only ever returned, never written to env.
  */
-export default async function resolveBearerToken(config: any): Promise<string> {
+export default async function resolveBearerToken(config: any, region?: string): Promise<string> {
   // ① explicit bearerToken — highest priority, use directly (do not mint).
   if (config && config.bearerToken) {
     return config.bearerToken;
   }
 
   // Region is only needed for minting; reuse helper (AD-7), never hardcode.
-  const region = helper.selectRandomRegion(config && config.regions);
+  const resolvedRegion = region ?? helper.selectRandomRegion(config && config.regions);
   const expiresInSeconds = resolveExpiresInSeconds(config);
 
   // ② explicit credentials — mint with them.
@@ -48,10 +54,10 @@ export default async function resolveBearerToken(config: any): Promise<string> {
     config && config.excludeAccessKeyId
   );
   if (credentials) {
-    return getToken({ credentials, region, expiresInSeconds });
+    return getToken({ credentials, region: resolvedRegion, expiresInSeconds });
   }
 
   // ③ default credential chain — mint via the default token provider.
-  const provideToken = getTokenProvider({ region, expiresInSeconds });
+  const provideToken = getTokenProvider({ region: resolvedRegion, expiresInSeconds });
   return provideToken();
 }
