@@ -9,6 +9,7 @@ import helper from "../util/helper";
 import WebResponse from "../util/response";
 import AbstractProvider from "./abstract_provider";
 import AnthropicResponse from '../util/anthropic_response';
+import { resolveInferencePolicy, applySamplingPolicy, resolveThinking } from '../util/inference_params';
 
 /**
 * BedrockConverse Provider uses boto3-converse api to invoke LLM models and support function calling.
@@ -690,7 +691,7 @@ export default class BedrockConverse extends AbstractProvider {
     }
 }
 
-class MessageConverter {
+export class MessageConverter {
 
     convertImageExt(mime?: string) {
         if (mime.indexOf('image/jpeg') >= 0 || mime.indexOf('image/jpg') >= 0) {
@@ -815,30 +816,21 @@ class MessageConverter {
         if (config.maxTokens && (maxTokens > config.maxTokens)) {
             maxTokens = config.maxTokens;
         }
-        // Resolve thinking: request body takes precedence over model config.
-        // Anthropic SDK sends: { thinking: { type: "enabled", budget_tokens: N } }
-        let thinking = false;
+        // AD-2: single table lookup. The resolved rule feeds sampling pruning (Story 1.1)
+        // and, later, the thinking path (Story 1.2).
+        const rule = resolveInferencePolicy(config.modelId);
+
+        // AD-5/AD-10: thinking is its own path, resolved against the SAME `rule` (no
+        // second lookup). Unsupported families get { active: false } → no thinking field
+        // and no forced sampling changes (Story 1.2, FR-9). All constraint numbers come
+        // from rule.thinking.
+        const thinkingPlan = resolveThinking(rule, chatRequest, config);
         let thinkBudget: number | undefined;
 
-        if (chatRequest.thinking?.type === 'enabled') {
-            // Client explicitly enabled thinking
-            thinking = true;
-            thinkBudget = chatRequest.thinking.budget_tokens;
-        } else if (chatRequest.thinking?.type === 'disabled') {
-            // Client explicitly disabled thinking — honour it even if config says true
-            thinking = false;
-        } else if (config && config.thinking) {
-            // Fall back to model config (backward compat)
-            thinking = true;
-            thinkBudget = config.thinkBudget;
-        }
-
-        if (thinking) {
-            if (!thinkBudget || thinkBudget < 1024) {
-                thinkBudget = 1024; // minimum budget_tokens
-            }
+        if (thinkingPlan.active) {
+            thinkBudget = thinkingPlan.thinkBudget;
             if (maxTokens <= thinkBudget) {
-                maxTokens = thinkBudget + 1024;
+                maxTokens = thinkBudget + thinkingPlan.maxTokensBumpOnCollision;
             }
         }
 
@@ -870,37 +862,36 @@ class MessageConverter {
             topP: chatRequest.top_p || 0.7
         };
 
-        if (thinking) {
-            delete inferenceConfig.topP;
-            inferenceConfig.temperature = 1;
-        }
-
         const additionalModelRequestFields: any = {
         }
         if (stopSequences && Array.isArray(stopSequences)) {
             inferenceConfig.stopSequences = stopSequences.slice(0, 4);
         }
-        if (thinking) {
+
+        // AD-5: fixed pipeline order — ① default fill (above) → ② thinking overlay (only
+        // when active) → ③ applySamplingPolicy. Presence-guarded mutual exclusion makes
+        // the order robust: opus-4 + thinking sets temperature=1 then the opus-4 allow-set
+        // (no temperature) deletes it; fallback Anthropic + thinking keeps temperature===1
+        // (topP already dropped, so the mutual-exclusion guard never fires).
+        // Unsupported families get thinkingPlan.active === false → no thinking field and
+        // no forced sampling change (FR-9).
+        if (thinkingPlan.active) {
+            if (thinkingPlan.dropTopP) {
+                delete inferenceConfig.topP;
+            }
+            inferenceConfig.temperature = thinkingPlan.forceTemperature;
             additionalModelRequestFields.thinking = {
                 type: "enabled",
                 budget_tokens: thinkBudget
             }
         }
 
+        // AD-3: data-driven sampling pruning — the ONLY sampling-parameter owner.
+        applySamplingPolicy(inferenceConfig, rule, chatRequest);
+
         if (config.modelId.includes("anthropic")) {
-            // claude-opus-4 and later models deprecated temperature/topP
-            const isOpus4OrLater = config.modelId.includes("claude-opus-4");
-            if (isOpus4OrLater) {
-                delete inferenceConfig.temperature;
-                delete inferenceConfig.topP;
-            } else {
-                // fix: temperature and top_p cannot both be specified
-                if (chatRequest.top_p && (!chatRequest.temperature)) {
-                    delete inferenceConfig.temperature;
-                } else {
-                    delete inferenceConfig.topP;
-                }
-            }
+            // anthropic_beta feature headers are a pre-existing NON-sampling special case
+            // (not part of the sampling allow-set), kept in the provider by design.
             const anthropicBetaFeatures = [];
             if (config.modelId.includes("anthropic.claude-3-7-sonnet")) {
                 anthropicBetaFeatures.push("output-128k-2025-02-19")
