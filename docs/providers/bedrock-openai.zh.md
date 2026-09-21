@@ -118,7 +118,7 @@ You must specify the parameter 'region' (or 'regions') in the backend model conf
 
 ## IAM 前提
 
-> ⚠️ **本节刻意不断言 IAM action 名。** 写错的后果是：照本文档配权限的人必然 `403`，而且——关键在于——**在本机用管理员凭证测试时这个失败永远复现不出来。**
+> ⚠️ **下面的 IAM action 名来自最小权限 IAM 角色下的实测 —— 不是推断。** 陷阱在于：**在本机用管理员凭证测试时这个失败永远复现不出来** —— 管理员身份被放行所有 action，权限缺失只有在真部署、以受限角色（例如 EC2 instance role）运行时才暴露。
 
 代码能确认的：
 
@@ -129,10 +129,19 @@ You must specify the parameter 'region' (or 'regions') in the backend model conf
 | 项 | 所需 IAM action | 状态 |
 | --- | --- | --- |
 | 经 `getToken()` / `getTokenProvider()` 铸 token（P2 / P3） | *（action 名）* | **未实测** |
-| 调用 `/openai/v1/chat/completions`（`bedrock-runtime` host） | *（action 名）* | **未实测** |
-| 调用 `/openai/v1/chat/completions`（`bedrock-mantle` host） | *（action 名）* | **未实测** |
+| 调用 `/openai/v1/chat/completions`（`bedrock-runtime` host） | `bedrock:CallWithBearerToken` | **实测** |
+| 调用 `/openai/v1/chat/completions`（`bedrock-mantle` host） | `bedrock-mantle:CallWithBearerToken` | **实测** |
 
-**「未实测」是一个明确结论，不是等着用推断填上的占位符。** 铸 token 路径与裸 SigV4 路径用的授权 action **不是同一个**，而这里根本没有裸 SigV4 路径可供推断。**不要**用 `bedrock:InvokeModel`（或任何从「Bedrock 调用一般需要 X」推出的 action）去替换。要定这些，需由工程师在**最小权限 IAM 角色**下实测 P2/P3 铸 token 加一次 `chat/completions` 调用，记录实际被拒/放行的 action。
+**为什么调用需要 `CallWithBearerToken` 而不是 `InvokeModel`。** 上表两个 `调用` 行是实测的，不是推断。在一个只持有 `bedrock:InvokeModel` / `InvokeModelWithResponseStream` / `ListFoundationModels`（没有 `CallWithBearerToken`）的 EC2 instance role 下，一次 `/openai/v1/chat/completions` 请求被拒，报文如下（观察）：
+
+```
+403 ... is not authorized to perform: bedrock-mantle:CallWithBearerToken on resource: *
+401 ... is not authorized to perform: bedrock:CallWithBearerToken on resource: *
+```
+
+补上 `bedrock:CallWithBearerToken` + `bedrock-mantle:CallWithBearerToken` 后，同一请求立刻成功（观察）。原因（据代码推断）：本 provider 从凭证链**本地**铸出短期 bearer token（`bedrock_token.ts:56-99`，经 `@aws/bedrock-token-generator` —— `package.json:27`），全程不构造任何 `@aws-sdk/client-*` 客户端，因此**没有裸 SigV4 请求路径**。`bedrock:InvokeModel` 是**裸 SigV4** 调用的授权 action；而以 `Authorization: Bearer <token>` 出站的请求，授权走的是 `CallWithBearerToken`，并按 host 加前缀 —— `bedrock-runtime` → `bedrock:CallWithBearerToken`，`bedrock-mantle` → `bedrock-mantle:CallWithBearerToken`。
+
+**铸 token 本身不消耗单独的 action —— 授权发生在调用阶段。** 在同一次最小权限测试里，角色没有 `CallWithBearerToken`，但 token 仍然成功铸出，只有**调用**被拒（观察）。这与「铸 token 是本地 presign、不打任何 AWS API」相符（据代码推断，`bedrock_token.ts:56-99`）。因此 **铸 token** 那一行保持 **未实测**：本轮只覆盖了 P3（默认凭证链 / instance role），没有任何证据表明铸 token 步骤需要它自己的 action，更没有任何证据覆盖静态 `credentials`（P2）铸 token 路径 —— 所以这里不断言任何 mint 阶段的 action。**不要**从「Bedrock 调用一般需要 X」推断一个出来。
 
 ## 请求 / 响应行为
 
