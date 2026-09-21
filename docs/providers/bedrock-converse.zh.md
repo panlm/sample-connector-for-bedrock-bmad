@@ -81,6 +81,31 @@ bedrock-converse 的配置示例如下：
 }
 ```
 
+## 按模型家族裁剪推理参数
+
+在调用 Converse API 之前，Provider 会按模型的**家族与代次**裁剪采样参数（`temperature`、`topP`、`stopSequences`），不再对所有模型套用同一条 Anthropic 专用规则。家族不接受的参数会被静默丢弃，因此传入不支持的参数不会再触发 Bedrock 的校验报错。`maxTokens` 始终保留，永不裁剪。
+
+| 家族（按 `modelId` 子串匹配） | temperature | topP | stopSequences | 说明 |
+| --- | --- | --- | --- | --- |
+| Anthropic `claude-opus-4` 及更新代次 | 丢弃 | 丢弃 | 保留 | opus-4 已弃用 `temperature`/`topP` |
+| Anthropic（其它代次） | 保留\* | 保留\* | 保留 | `temperature` 与 `topP` 互斥 —— 见下 |
+| Nova | 保留 | 保留 | 保留 | |
+| Llama | 保留 | 保留 | **丢弃** | Llama 无 `stopSequences` |
+| 其它 / 未匹配家族 | 丢弃 | 丢弃 | 丢弃 | 保守最小集 —— 只保留 `maxTokens` |
+
+\* 对非 opus-4 的 Anthropic 模型，`temperature` 与 `topP` 不能同时传。当请求两者都带时：仅当请求提供了 `top_p` 且未提供 `temperature`，才保留 `topP`；否则保留 `temperature`、丢弃 `topP`。
+
+`anthropic_beta` 特性头（如 `claude-3-7-sonnet` 的 128k 输出）保持不变，不属于采样参数裁剪的范围。
+
+### 各家族的 thinking 行为
+
+`thinking` 现在按家族走独立路径：
+
+- **支持的家族（Anthropic）。** 开启 thinking 时——通过请求体 `thinking.type: "enabled"`，或配置 `thinking: true`——Provider 会加上 `thinking` 字段与 `budget_tokens`（最小 1024），强制 `temperature: 1`，并丢弃 `topP`。若 `maxTokens <= budget_tokens`，则把 `maxTokens` 抬到 `budget_tokens + 1024`。请求体的 `thinking` 优先于模型配置；即使配置为 `thinking: true`，`thinking.type: "disabled"` 也会关闭 thinking。
+- **不支持的家族（Nova、Llama 及任何未匹配家族）。** 请求 thinking 不再产生副作用：不会加 `thinking` 字段，也**不会**把 `temperature`/`topP` 强制为 Anthropic 的 thinking 取值，请求按该家族正常的采样参数继续。
+
+这修正了此前的行为缺陷：对非 Anthropic 模型开启 thinking 时会误加 `thinking` 字段并强制 `temperature=1` / 删除 `topP`，即便该模型并不支持这种形态的扩展推理。
+
 ## 输出结果
 
 输出中增加了 reasoning_content 字段，与 deepseek 的输出保持一致。如下：

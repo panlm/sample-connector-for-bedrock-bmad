@@ -54,6 +54,31 @@ The configuration example:
 }
 ```
 
+## Inference parameters by model family
+
+The provider prunes sampling parameters (`temperature`, `topP`, `stopSequences`) per model **family and generation** before calling the Converse API, instead of applying one Anthropic-specific rule to every model. Parameters a family does not accept are dropped silently, so passing an unsupported parameter no longer triggers a Bedrock validation error. `maxTokens` is always kept and is never pruned.
+
+| Family (matched by `modelId` substring) | temperature | topP | stopSequences | Notes |
+| --- | --- | --- | --- | --- |
+| Anthropic `claude-opus-4` and later | dropped | dropped | kept | opus-4 deprecated `temperature`/`topP` |
+| Anthropic (other generations) | kept\* | kept\* | kept | `temperature` and `topP` are mutually exclusive — see below |
+| Nova | kept | kept | kept | |
+| Llama | kept | kept | **dropped** | Llama has no `stopSequences` |
+| Any other / unmatched family | dropped | dropped | dropped | Conservative minimum — only `maxTokens` survives |
+
+\* For non-opus-4 Anthropic models, `temperature` and `topP` cannot both be sent. When a request carries both, the provider keeps `topP` only if the request supplied `top_p` and no `temperature`; otherwise it keeps `temperature` and drops `topP`.
+
+The `anthropic_beta` feature headers (e.g. 128k output for `claude-3-7-sonnet`) are unchanged and are not part of sampling-parameter pruning.
+
+### thinking behavior by family
+
+`thinking` is now resolved on a per-family path:
+
+- **Supported families (Anthropic).** When thinking is enabled — via the request body `thinking.type: "enabled"`, or the `thinking: true` config — the provider adds the `thinking` field with `budget_tokens` (minimum 1024), forces `temperature: 1`, and drops `topP`. If `maxTokens <= budget_tokens`, `maxTokens` is raised to `budget_tokens + 1024`. Request-body `thinking` takes precedence over the model config, and `thinking.type: "disabled"` disables thinking even when the config sets `thinking: true`.
+- **Unsupported families (Nova, Llama, and any unmatched family).** Requesting thinking no longer has side effects: the `thinking` field is not added, and `temperature`/`topP` are **not** forced to the Anthropic thinking values. The request proceeds with that family's normal sampling parameters.
+
+This corrects prior behavior where enabling thinking against a non-Anthropic model injected a `thinking` field and forced `temperature=1` / removed `topP` even though the model does not support extended reasoning in that shape.
+
 ## Output Results
 
 The output adds a reasoning_content field, consistent with deepseek's output. As follows:
