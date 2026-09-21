@@ -81,6 +81,34 @@ bedrock-converse 的配置示例如下：
 }
 ```
 
+## 按模型家族裁剪推理参数
+
+在调用 Converse API 之前，Provider 会按模型的**家族与代次**裁剪采样参数（`temperature`、`topP`、`stopSequences`），不再对所有模型套用同一条 Anthropic 专用规则。家族不接受的参数会被静默丢弃，因此传入不支持的参数不会再触发 Bedrock 的校验报错。`maxTokens` 始终保留，永不裁剪。
+
+请求未提供 `temperature`/`topP` 时，Provider 会把它们默认填充为 `0.7`，因此裁剪逻辑运行时这两个值总是存在的。
+
+| 家族（按 `modelId` 子串匹配） | temperature | topP | stopSequences | 说明 |
+| --- | --- | --- | --- | --- |
+| Anthropic `claude-opus-4`（含 `claude-opus-4-*`） | 丢弃 | 丢弃 | 保留 | 按字面子串 `claude-opus-4` 匹配；两个采样参数都裁掉 |
+| Anthropic（其它任意代次） | 保留\* | 丢弃\* | 保留 | `temperature` 与 `topP` 互斥 —— 见下 |
+| Nova | 保留 | 保留 | 保留 | |
+| Llama | 保留 | 保留 | **丢弃** | Llama 无 `stopSequences` |
+| 其它 / 未匹配家族 | 丢弃 | 丢弃 | 丢弃 | 保守最小集 —— 只保留 `maxTokens` |
+
+\* 本行覆盖 `claude-opus-4` **以外**的所有 Anthropic 模型，包括 `claude-opus-5-*` —— 后者不含 `claude-opus-4` 子串，故走互斥而非 drop-both。由于 `temperature` 与 `topP` 都被默认填充，互斥判定对这些模型**每次请求都会运行**：**仅当**请求提供了真值 `top_p` 且未提供 `temperature`（显式 `0` 视同缺省）时，才保留 `topP`、丢弃 `temperature`；其它所有情形——包括两者都不提供——都保留 `temperature`、丢弃 `topP`。
+
+`anthropic_beta` 特性头（如 `claude-3-7-sonnet` 的 128k 输出）保持不变，不属于采样参数裁剪的范围。
+
+### 各家族的 thinking 行为
+
+`thinking` 现在按家族走独立路径：
+
+- **支持的家族（Anthropic）。** 开启 thinking 时，Provider 会加上 `thinking` 字段与 `budget_tokens`（最小 1024），并丢弃 `topP`；若 `maxTokens <= budget_tokens`，则把 `maxTokens` 抬到 `budget_tokens + 1024`。它还会强制 `temperature: 1`，但该值只对接受 `temperature` 的 Anthropic 代次（即走互斥的那些代次）留得下来。对放行集仅为 `stopSequences` 的 `claude-opus-4`，被强制的 `temperature` 随后会被裁掉 —— 因此 opus-4 + thinking 请求最终 **既无** `temperature` **也无** `topP`。
+  - **enable/disable 优先级。** 只有当 `thinking.type` 取 `"enabled"` 或 `"disabled"` 时，请求体才覆盖模型配置。缺少 `type` 的 `thinking` 对象（例如只带 `budget_tokens`）或其它 `type` 值，都会回落到模型配置的 `thinking` 设置。
+- **不支持的家族（Nova、Llama 及任何未匹配家族）。** 请求 thinking 不再产生副作用：不会加 `thinking` 字段，也**不会**把 `temperature`/`topP` 强制为 Anthropic 的 thinking 取值。Nova 与 Llama 按各自的采样参数继续；未匹配家族则仍只保留 `maxTokens`（见上表）。
+
+这修正了此前的行为缺陷：对非 Anthropic 模型开启 thinking 时会误加 `thinking` 字段并强制 `temperature=1` / 删除 `topP`，即便该模型并不支持这种形态的扩展推理。
+
 ## 输出结果
 
 输出中增加了 reasoning_content 字段，与 deepseek 的输出保持一致。如下：
