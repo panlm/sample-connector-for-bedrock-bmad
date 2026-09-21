@@ -3,16 +3,17 @@
 通过 OpenAI 兼容传输层调用 Amazon Bedrock。
 
 本 provider 使用 **OpenAI SDK** 访问 Amazon Bedrock 的 OpenAI 兼容端点（`/openai/v1`
-路径）。它会解析出一个短期 **bearer token** 用于出站认证，并作为 OpenAI 的 `apiKey`
-传入。它**从不**构造 AWS SDK client，**从不**写 `process.env`。
+路径）。它会解析出一个 **bearer token**（铸造得来，默认与上限均为 12 小时；或显式传入）
+用于出站认证，并作为 OpenAI 的 `apiKey` 传入。它**从不**构造 AWS SDK client，**从不**写
+`process.env`。
 
 ## 何时使用它（对比 `bedrock-converse`）
 
 | | `bedrock-openai` | `bedrock-converse` |
 | --- | --- | --- |
 | 传输层 | OpenAI SDK，打到 Bedrock 的 `/openai/v1` 端点 | AWS SDK Converse API |
-| 出站认证 | bearer token 作 OpenAI `apiKey` | AWS SigV4（会把 `AWS_BEARER_TOKEN_BEDROCK` 写进 `process.env`） |
-| 是否写 `process.env` | **否** —— bearer 只作为返回值离开 | 是 |
+| 出站认证 | bearer token 作 OpenAI `apiKey` | 两种模式：① `bearerToken` → 写入 `process.env` 的 `AWS_BEARER_TOKEN_BEDROCK`；② `credentials`/AKSK → 设为 AWS SDK client 的 `credentials`（SigV4 签名） |
+| 是否写 `process.env` | **否** —— bearer 只作为返回值离开 | 仅 `bearerToken` 模式写（`AWS_BEARER_TOKEN_BEDROCK`）；AKSK/SigV4 模式设 SDK client 的 `credentials`，**不**写 env |
 | 是否静默回退 SigV4 | **否** —— bearer/认证失败即硬失败 | 不适用 |
 
 当你希望以 OpenAI API 形态访问 Bedrock（面向已经使用 OpenAI 接口的工具和客户端），
@@ -35,7 +36,8 @@
 ```
 
 当传入请求未携带 `model_id` 时，`model` 会作为兜底的 `model_id`。`regions` 接受单个
-字符串或数组；配置多个 region 时，每次调用随机选一个。
+字符串或数组；配置多个 region 时，每次调用随机选一个。单个字符串会**按逗号切分**
+（如 `"us-east-1,us-west-2"`），因此逗号分隔的字符串会被当作多 region 列表、随机选一个。
 
 ### 配置项
 
@@ -44,27 +46,30 @@
 | 键 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `model` | string | 否 | — | 模型 id。请求未带 `model_id` 时作为兜底。 |
-| `regions` | string \| string[] | 否 | `us-east-1` | 单个 region 或列表。列表时每次调用随机选一个。回落顺序为 `config.bedrock.region`，再到 `us-east-1`。 |
+| `regions` | string \| string[] | 否 | `config.bedrock.region`，否则 `us-east-1` | 单个 region 或列表。字符串会按逗号切分并当作列表；列表时每次调用随机选一个。未设时，首选默认是 `config.bedrock.region`，`us-east-1` 仅为末级兜底。 |
 | `endpointFlavor` | `bedrock-runtime` \| `bedrock-mantle` | 否 | `bedrock-runtime` | 选择端点主机，见 [端点形态（endpointFlavor）](#端点形态endpointflavor)。 |
 | `bearerToken` | string | 否 | — | 显式 bearer token，原样使用（不铸造）。优先级最高。 |
 | `credentials` | object[] | 否 | — | AWS 凭证对象数组（`{ accessKeyId, secretAccessKey }`），用于铸造 bearer。见 [出站认证方式](#出站认证方式)。 |
 | `excludeAccessKeyId` | string | 否 | — | 设置后，在选取前排除 `accessKeyId` 与之匹配的凭证。 |
-| `tokenExpiresInSeconds` | number | 否 | `43200`（12 小时） | 铸造 bearer 时请求的 TTL。上限 43200（12 小时），超出静默截断。 |
+| `tokenExpiresInSeconds` | number | 否 | `43200`（12 小时） | 铸造 bearer 时请求的 TTL。上限 43200（12 小时），超出静默截断。仅对铸造路径（② 与 ③）生效；对显式 `bearerToken`（①）无效。 |
 
 > ⚠️ 配置键是 `endpointFlavor`，**不是** `endpointType`。键名拼错会被静默忽略，端点回落到
 > 默认值（`bedrock-runtime`）。
 
 ### 推理参数
 
-请求未指定时，`temperature` 和 `top_p` 均默认为 `1.0`。`max_tokens`、
-`max_completion_tokens`、`tools`、`tool_choice` 在存在时透传。流式响应会在 delta 中带出
-`reasoning_content` 字段（与其它 provider 的流式输出一致）。
+请求省略**或传入 falsy 值**时，`temperature` 和 `top_p` 回落为 `1.0`。代码用的是
+`chatRequest.temperature || 1.0`（及 `chatRequest.top_p || 1.0`）的 falsy 合并 —— 因此显式
+传 `temperature: 0` 会被当作 falsy 并**静默改成 `1.0`**。故本 provider 无法表达
+`temperature: 0` 或 `top_p: 0`。`max_tokens`、`max_completion_tokens`、`tools`、`tool_choice`
+在存在时透传。流式响应会在 delta 中带出 `reasoning_content` 字段（与其它 provider 的流式输出一致）。
 
 ## 出站认证方式
 
 bearer token 在单一决策点解析，三条路径互斥，按优先级从高到低：
 
 **① 显式 `bearerToken`（优先级最高）。** 该值直接作为 OpenAI `apiKey` 使用 —— 不铸造。
+判断是 truthy 检查，因此 falsy 值（如空字符串 `""`）会被忽略，解析回落到铸造（路径 ② 或 ③）。
 
 ```json
 {
@@ -75,6 +80,10 @@ bearer token 在单一决策点解析，三条路径互斥，按优先级从高�
 
 **② 显式 `credentials`（铸造）。** 从数组中选取一份凭证（遵守 `excludeAccessKeyId`），
 并通过 `@aws/bedrock-token-generator`（`^1.1.0`）用它铸造 bearer。
+
+> ⚠️ 若数组为空、不是数组，或被 `excludeAccessKeyId` 全部过滤掉，凭证选取会返回空，解析
+> 随即**静默回落到默认凭证链（路径 ③）** —— 不报错。因此配错的 `credentials` 块不会硬失败，
+> 而是 fail-open 到环境里的 AWS 凭证。
 
 ```json
 {

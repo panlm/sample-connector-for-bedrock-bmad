@@ -3,7 +3,8 @@
 Amazon Bedrock via the OpenAI-compatible transport.
 
 This provider talks to Amazon Bedrock's OpenAI-compatible surface (the
-`/openai/v1` path) using the **OpenAI SDK**. A short-lived **bearer token** is
+`/openai/v1` path) using the **OpenAI SDK**. A **bearer token** — either minted
+(with a default and maximum lifetime of 12h) or supplied explicitly — is
 resolved for outbound auth and passed as the OpenAI `apiKey`. It never
 constructs an AWS SDK client and never writes `process.env`.
 
@@ -12,8 +13,8 @@ constructs an AWS SDK client and never writes `process.env`.
 | | `bedrock-openai` | `bedrock-converse` |
 | --- | --- | --- |
 | Transport | OpenAI SDK against Bedrock's `/openai/v1` endpoint | AWS SDK Converse API |
-| Outbound auth | Bearer token as OpenAI `apiKey` | AWS SigV4 (writes `AWS_BEARER_TOKEN_BEDROCK` to `process.env`) |
-| Writes `process.env` | **No** — the bearer only ever leaves as a return value | Yes |
+| Outbound auth | Bearer token as the OpenAI `apiKey` | Two modes: ① `bearerToken` → written to `AWS_BEARER_TOKEN_BEDROCK` in `process.env`; ② `credentials`/AKSK → set as the AWS SDK client's `credentials` (SigV4 signing) |
+| Writes `process.env` | **No** — the bearer only ever leaves as a return value | Only in the `bearerToken` mode (writes `AWS_BEARER_TOKEN_BEDROCK`); the AKSK/SigV4 mode sets the SDK client's `credentials` and does **not** write env |
 | Silent SigV4 fallback | **No** — a bearer/auth failure is a hard failure | n/a |
 
 Choose `bedrock-openai` when you want to reach Bedrock through the OpenAI
@@ -39,7 +40,9 @@ Configure a model row with `provider: bedrock-openai`. Minimal config:
 
 `model` is used as the fallback `model_id` when the incoming request does not
 carry one. `regions` accepts a single string or an array; with multiple
-regions one is picked at random per call.
+regions one is picked at random per call. A single string is **split on
+commas** (e.g. `"us-east-1,us-west-2"`), so a comma-separated string is treated
+as a multi-region list from which one region is chosen at random.
 
 ### Configuration keys
 
@@ -48,12 +51,12 @@ All key names are camelCase, matching the implementation exactly.
 | Key | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `model` | string | N | — | Model id. Used as the fallback `model_id` when the request omits one. |
-| `regions` | string \| string[] | N | `us-east-1` | Single region or list. With a list, one region is chosen at random per call. Falls back to `config.bedrock.region`, then `us-east-1`. |
+| `regions` | string \| string[] | N | `config.bedrock.region`, else `us-east-1` | Single region or list. A string is split on commas and treated as a list; with a list, one region is chosen at random per call. When unset, the primary default is `config.bedrock.region`; `us-east-1` is only the last-resort fallback. |
 | `endpointFlavor` | `bedrock-runtime` \| `bedrock-mantle` | N | `bedrock-runtime` | Selects the endpoint host. See [Endpoint flavor](#endpoint-flavor). |
 | `bearerToken` | string | N | — | An explicit bearer token, used as-is (no minting). Highest priority. |
 | `credentials` | object[] | N | — | AWS credential objects (`{ accessKeyId, secretAccessKey }`) used to mint a bearer. See [Outbound authentication](#outbound-authentication). |
 | `excludeAccessKeyId` | string | N | — | When set, credentials whose `accessKeyId` matches are excluded before selection. |
-| `tokenExpiresInSeconds` | number | N | `43200` (12h) | Requested bearer TTL when minting. Capped at 43200 (12h); a larger value is silently clamped. |
+| `tokenExpiresInSeconds` | number | N | `43200` (12h) | Requested bearer TTL when minting. Capped at 43200 (12h); a larger value is silently clamped. Applies only to the minting paths (② and ③); it has no effect on an explicit `bearerToken` (①). |
 
 > ⚠️ The config key is `endpointFlavor`, **not** `endpointType`. A misspelled
 > key is silently ignored and the endpoint falls back to the default
@@ -61,7 +64,11 @@ All key names are camelCase, matching the implementation exactly.
 
 ### Inference parameters
 
-`temperature` and `top_p` both default to `1.0` when the request omits them.
+`temperature` and `top_p` fall back to `1.0` when the request omits them **or
+passes a falsy value**. The code uses `chatRequest.temperature || 1.0` (and
+`chatRequest.top_p || 1.0`), a falsy-coalesce — so an explicit `0` is treated as
+falsy and **silently replaced with `1.0`**. This provider therefore cannot send
+`temperature: 0` or `top_p: 0`.
 `max_tokens`, `max_completion_tokens`, `tools`, and `tool_choice` are passed
 through when present. Streaming responses surface a `reasoning_content` field
 in the delta (consistent with the other providers' streaming output).
@@ -72,7 +79,9 @@ The bearer token is resolved at a single decision point, with three mutually
 exclusive paths in priority order:
 
 **① Explicit `bearerToken` (highest priority).** The value is used directly as
-the OpenAI `apiKey` — nothing is minted.
+the OpenAI `apiKey` — nothing is minted. The check is a truthy test, so a falsy
+value (e.g. an empty string `""`) is ignored and resolution falls through to
+minting (path ② or ③).
 
 ```json
 {
@@ -84,6 +93,12 @@ the OpenAI `apiKey` — nothing is minted.
 **② Explicit `credentials` (minted).** One credential is selected from the
 array (respecting `excludeAccessKeyId`) and a bearer is minted from it via
 `@aws/bedrock-token-generator` (`^1.1.0`).
+
+> ⚠️ If the array is empty, not an array, or every entry is filtered out by
+> `excludeAccessKeyId`, credential selection returns nothing and the resolver
+> **silently falls back to the default credential chain (path ③)** — no error
+> is raised. A misconfigured `credentials` block therefore fails open to the
+> ambient AWS credentials rather than failing loudly.
 
 ```json
 {
