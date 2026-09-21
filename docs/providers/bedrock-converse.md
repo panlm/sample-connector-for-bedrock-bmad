@@ -58,15 +58,17 @@ The configuration example:
 
 The provider prunes sampling parameters (`temperature`, `topP`, `stopSequences`) per model **family and generation** before calling the Converse API, instead of applying one Anthropic-specific rule to every model. Parameters a family does not accept are dropped silently, so passing an unsupported parameter no longer triggers a Bedrock validation error. `maxTokens` is always kept and is never pruned.
 
+The provider default-fills `temperature` and `topP` to `0.7` when the request omits them, so both values are always present by the time pruning runs.
+
 | Family (matched by `modelId` substring) | temperature | topP | stopSequences | Notes |
 | --- | --- | --- | --- | --- |
-| Anthropic `claude-opus-4` and later | dropped | dropped | kept | opus-4 deprecated `temperature`/`topP` |
-| Anthropic (other generations) | kept\* | kept\* | kept | `temperature` and `topP` are mutually exclusive — see below |
+| Anthropic `claude-opus-4` (incl. `claude-opus-4-*`) | dropped | dropped | kept | Matched by the literal substring `claude-opus-4`; both sampling params are pruned |
+| Anthropic (any other generation) | kept\* | dropped\* | kept | `temperature` and `topP` are mutually exclusive — see below |
 | Nova | kept | kept | kept | |
 | Llama | kept | kept | **dropped** | Llama has no `stopSequences` |
 | Any other / unmatched family | dropped | dropped | dropped | Conservative minimum — only `maxTokens` survives |
 
-\* For non-opus-4 Anthropic models, `temperature` and `topP` cannot both be sent. When a request carries both, the provider keeps `topP` only if the request supplied `top_p` and no `temperature`; otherwise it keeps `temperature` and drops `topP`.
+\* This row covers every Anthropic model **except** `claude-opus-4` — including `claude-opus-5-*`, which does not contain the `claude-opus-4` substring and therefore uses mutual exclusion rather than drop-both. Because both `temperature` and `topP` are default-filled, the mutual-exclusion resolution runs on every request for these models: it keeps `topP` (and drops `temperature`) **only** when the request supplied a truthy `top_p` and no `temperature` (an explicit `0` counts as absent); in every other case — including when the request supplies neither — it keeps `temperature` and drops `topP`.
 
 The `anthropic_beta` feature headers (e.g. 128k output for `claude-3-7-sonnet`) are unchanged and are not part of sampling-parameter pruning.
 
@@ -74,8 +76,9 @@ The `anthropic_beta` feature headers (e.g. 128k output for `claude-3-7-sonnet`) 
 
 `thinking` is now resolved on a per-family path:
 
-- **Supported families (Anthropic).** When thinking is enabled — via the request body `thinking.type: "enabled"`, or the `thinking: true` config — the provider adds the `thinking` field with `budget_tokens` (minimum 1024), forces `temperature: 1`, and drops `topP`. If `maxTokens <= budget_tokens`, `maxTokens` is raised to `budget_tokens + 1024`. Request-body `thinking` takes precedence over the model config, and `thinking.type: "disabled"` disables thinking even when the config sets `thinking: true`.
-- **Unsupported families (Nova, Llama, and any unmatched family).** Requesting thinking no longer has side effects: the `thinking` field is not added, and `temperature`/`topP` are **not** forced to the Anthropic thinking values. The request proceeds with that family's normal sampling parameters.
+- **Supported families (Anthropic).** When thinking is enabled, the provider adds the `thinking` field with `budget_tokens` (minimum 1024) and drops `topP`; if `maxTokens <= budget_tokens`, `maxTokens` is raised to `budget_tokens + 1024`. It also forces `temperature: 1`, but that value only survives for Anthropic generations that accept `temperature` (the mutually-exclusive generations). For `claude-opus-4`, whose allow-set is `stopSequences` only, the forced `temperature` is pruned afterwards — so an opus-4 + thinking request ends up with **neither** `temperature` nor `topP`.
+  - **Enable/disable precedence.** The request body overrides the model config only when `thinking.type` is `"enabled"` or `"disabled"`. A `thinking` object without a `type` (e.g. one carrying only `budget_tokens`), or any other `type` value, falls back to the model config's `thinking` setting.
+- **Unsupported families (Nova, Llama, and any unmatched family).** Requesting thinking no longer has side effects: the `thinking` field is not added, and `temperature`/`topP` are **not** forced to the Anthropic thinking values. Nova and Llama proceed with their own sampling parameters; an unmatched family still keeps only `maxTokens` (per the table above).
 
 This corrects prior behavior where enabling thinking against a non-Anthropic model injected a `thinking` field and forced `temperature=1` / removed `topP` even though the model does not support extended reasoning in that shape.
 
