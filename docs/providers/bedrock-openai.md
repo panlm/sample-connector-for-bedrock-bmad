@@ -118,7 +118,7 @@ With neither `bearerToken` nor `credentials` set, the token is minted from the A
 
 ## IAM prerequisites
 
-> ⚠️ **This section deliberately does not assert IAM action names.** Getting them wrong means anyone who configures permissions from this doc will hit `403`, and — critically — **the failure will not reproduce when testing locally with administrator credentials.**
+> ⚠️ **The IAM action names below come from testing under a least-privilege IAM role — not from inference.** The trap is that they **will not reproduce when testing locally with administrator credentials**: an admin identity is allowed every action, so a missing permission only surfaces on a real deployment running under a restricted role (e.g. an EC2 instance role).
 
 What the code lets us confirm:
 
@@ -129,10 +129,19 @@ What the code lets us confirm:
 | Item | Required IAM action | Status |
 | --- | --- | --- |
 | Mint token via `getToken()` / `getTokenProvider()` (P2 / P3) | *(action name)* | **Untested** |
-| Call `/openai/v1/chat/completions` (`bedrock-runtime` host) | *(action name)* | **Untested** |
-| Call `/openai/v1/chat/completions` (`bedrock-mantle` host) | *(action name)* | **Untested** |
+| Call `/openai/v1/chat/completions` (`bedrock-runtime` host) | `bedrock:CallWithBearerToken` | **Measured** |
+| Call `/openai/v1/chat/completions` (`bedrock-mantle` host) | `bedrock-mantle:CallWithBearerToken` | **Measured** |
 
-**"Untested" is a firm statement, not a placeholder to be filled by inference.** The token-minting path and a bare SigV4 path do **not** use the same authorization action, and there is no bare SigV4 path here to reason from. Do **not** substitute `bedrock:InvokeModel` (or any action inferred from "Bedrock calls generally need X"). To resolve these, an engineer must test P2/P3 minting plus one `chat/completions` call **under a least-privilege IAM role** and record the action that is actually denied/allowed.
+**Why the call needs `CallWithBearerToken` and not `InvokeModel`.** The two `Call` rows above are measured, not inferred. On an EC2 instance role holding only `bedrock:InvokeModel` / `InvokeModelWithResponseStream` / `ListFoundationModels` (no `CallWithBearerToken`), a `/openai/v1/chat/completions` request was denied with *(observed)*:
+
+```
+403 ... is not authorized to perform: bedrock-mantle:CallWithBearerToken on resource: *
+401 ... is not authorized to perform: bedrock:CallWithBearerToken on resource: *
+```
+
+Adding `bedrock:CallWithBearerToken` + `bedrock-mantle:CallWithBearerToken` made the same request succeed *(observed)*. The reason *(inference from the code)*: this provider mints a short-lived bearer token **locally** from the credential chain (`bedrock_token.ts:56-99`, via `@aws/bedrock-token-generator` — `package.json:27`) and never constructs an `@aws-sdk/client-*` client, so there is **no bare SigV4 request path**. `bedrock:InvokeModel` is the authorization action for *bare SigV4* calls; a request that goes out as `Authorization: Bearer <token>` is instead authorized by `CallWithBearerToken`, prefixed by host — `bedrock-runtime` → `bedrock:CallWithBearerToken`, `bedrock-mantle` → `bedrock-mantle:CallWithBearerToken`.
+
+**Minting the token does not consume a separate action — authorization happens at call time.** In the same least-privilege test, the role had no `CallWithBearerToken` yet the token was still minted successfully; only the *call* was rejected *(observed)*. This is consistent with minting being a local presign that makes no AWS API call *(inference from the code, `bedrock_token.ts:56-99`)*. The **Mint token** row therefore stays **Untested**: the run exercised only P3 (the default credential chain / instance role), produced no evidence that the mint step needs any action of its own, and produced no evidence at all for the static `credentials` (P2) mint path — so no mint-time action is asserted here. Do **not** infer one from "Bedrock calls generally need X".
 
 ## Request / response behavior
 
