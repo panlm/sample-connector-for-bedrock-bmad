@@ -127,22 +127,48 @@ bearer token 在单一决策点解析，三条路径互斥，按优先级从高�
 
 ## IAM 前提
 
-> ⚠️ **本轮未对所需 IAM action 做实测，因此下表一律标注「未实测」。** **铸造 token** 路径
-> 所需的 action 与裸 SigV4 Bedrock 调用**不是同一个**。本 provider 不构造 AWS SDK client、
-> 从不调用 `InvokeModel`；token 通过第三方库 `@aws/bedrock-token-generator` 铸造，而仓库测试
-> 对该库和所有 AWS SDK client 全部 mock。因此仓库内没有真实授权 action 的证据。**不要**从
-> 「Bedrock 调用一般需要 `InvokeModel`」推断此处所需 action —— 此处填错的后果是：照本文档配置
-> 权限的人必然 403，而且用管理员凭证在本机测试时永远复现不出来。
+> ✅ **运行时 bearer 调用权限已实测确认 —— 但要注意这份证据的适用范围。** 我们实际观测到的唯一一次
+> 部署 —— 一个**默认 `bedrock-runtime` 部署**、从默认凭证链（EC2 instance role）认证 —— 中，
+> **同一个** `/v1/chat/completions` 请求**同时**需要授予 `bedrock:CallWithBearerToken`（报为 `401`）
+> **和** `bedrock-mantle:CallWithBearerToken`（报为 `403`）；**两条都补上**之后同一请求才成功。
+> 所以并没有证据表明 `bedrock-runtime` 部署只需 `bedrock:CallWithBearerToken` —— 观测到的这一例
+> 连 `bedrock-mantle:` 那条也要。无论哪条，action 都是 `{service}:CallWithBearerToken`，
+> **不是**裸 SigV4 的 `bedrock:InvokeModel`。
+>
+> **为什么走 `CallWithBearerToken` 而非 `InvokeModel`。** 本 provider 从不构造 AWS SDK client、
+> 从不调用 `InvokeModel`。它经第三方库 `@aws/bedrock-token-generator` 从凭证链铸造一枚短期 bearer，
+> 作为 OpenAI 的 `apiKey` 打到 `/openai/v1` 端点。**用 bearer token 授权调用时，授权走
+> `CallWithBearerToken` 这条 action，而不是 SigV4 那条 `InvokeModel`。**「Bedrock 调用需要
+> `InvokeModel`」只对**裸 SigV4** 成立，不适用于本 provider 的路径。按 `endpointFlavor` 划分的
+> service 前缀映射（`bedrock-runtime` → `bedrock:`、`bedrock-mantle` → `bedrock-mantle:`）是由端点
+> 各自的 service namespace **推断**得来，并未逐 flavor 独立实测。另外，上面的观测只证明了**调用**这条
+> action；**铸造** bearer 那一步本身消耗的 IAM action 在本次测试中未被单独隔离，故在下表中保留「未实测」。
+>
+> ⚠️ **本机用管理员凭证裸 SigV4 测不出这个错误。** 用管理员身份在本机 `curl --aws-sigv4` 走的是
+> 裸 SigV4 路径，在这条路径上管理员身份的**授权**总会通过（请求仍可能因 region、model id、quota 等
+> 其它原因非 `200`）。正因为授权在这条路径上从不失败，缺失的 `CallWithBearerToken` 权限在本机就看不出来。
+> 只有真部署、从默认凭证链铸造（如 EC2 instance role，即文档推荐的生产形态）时，才会暴露
+> `CallWithBearerToken` 的失败。一个只授予 `bedrock:InvokeModel` /
+> `bedrock:InvokeModelWithResponseStream` 的 instance role ——一个很自然的猜测——**并不够**。
+>
+> 两个凭证来源的**铸造** action（② 静态 `credentials`、③ 默认链）以及传入 bearer 的情形
+> （① 显式 `bearerToken`）**本轮仍未实测**，保持相应标注。**不要**由上面的运行时调用结论推断它们。
 
 | 认证路径 | 触发条件 | 所需 IAM action | 状态 |
 | --- | --- | --- | --- |
-| 铸造 token（② `credentials` / ③ 默认链） | 由 AWS 凭证经 `@aws/bedrock-token-generator` 铸造 bearer | 铸造 bearer 所需的 action（**不是** `bedrock:InvokeModel`） | **未实测** |
+| bearer 调用 —— 观测到的默认（`bedrock-runtime`）部署 | 在被测 EC2 instance-role 部署上观测到的那一次 `/v1/chat/completions` 请求 | 该单个请求**同时**需要 `bedrock:CallWithBearerToken`（报为 `401`）**与** `bedrock-mantle:CallWithBearerToken`（报为 `403`）；两条都授予后同一请求才成功 | **已实测**（限此部署） |
+| bearer 调用 —— 前缀归因，`endpointFlavor: bedrock-runtime` | bearer 打到 `https://bedrock-runtime.{region}.amazonaws.com/openai/v1` | 调用 action 的前缀取自端点 service namespace → `bedrock:CallWithBearerToken` | **推断**（由 service namespace 推得，未逐 flavor 独立实测） |
+| bearer 调用 —— 前缀归因，`endpointFlavor: bedrock-mantle` | bearer 打到 `https://bedrock-mantle.{region}.api.aws/openai/v1` | → `bedrock-mantle:CallWithBearerToken` | **推断**（由 service namespace 推得，未逐 flavor 独立实测） |
+| 铸造 token —— ③ 默认凭证链 | 由默认链（如 EC2 instance role）经 `@aws/bedrock-token-generator` 铸造 bearer 的那一步 | 铸造步骤消耗的 action（**不是** `bedrock:InvokeModel`）；本次测试实测的是随后的调用，而非铸造步骤 | **未实测** |
+| 铸造 token —— ② 静态 `credentials` | 由显式 `credentials` 条目经同一 `@aws/bedrock-token-generator` 铸造 bearer 的那一步 | 从静态凭证铸造所需的 action（**不是** `bedrock:InvokeModel`） | **未实测**（本轮无证据） |
 | 裸 SigV4（本 provider **不涉及**，仅作对照） | 直接对 Bedrock 运行时 API 发起 SigV4 签名调用 | 运行时调用 action（如 `bedrock:InvokeModel*` 家族） | **未实测**（且不在本 provider 路径上） |
-| bearer 打到 OpenAI 兼容端点做推理 | ①②③ 任一取得 bearer 后发起请求 | bearer 需承载的调用权限 | **未实测** |
-| ① 显式 `bearerToken` | 传入一个已铸好的 bearer | 运行时不涉及 AWS 凭证；铸造该 bearer 发生在 BRConnector 之外 | **未实测 / 运行时不适用** |
+| ① 显式 `bearerToken`（传入，非铸造） | 直接传入一个已铸好的 bearer | 运行时不涉及 AWS 凭证、也不铸造；铸造该 bearer 的身份需具备上面的调用 action，但那发生在 BRConnector 之外 | **未实测 / 运行时不适用** |
 
-要定这些条目，请对照 `@aws/bedrock-token-generator` 1.1.0 与 AWS Bedrock API Key / bearer
-文档核实铸造 action，或保留「未实测」标注。不要靠推断填入。
+运行时 **bearer 调用** action 对观测到的这次部署已定案（`{service}:CallWithBearerToken`，**不是**
+`bedrock:InvokeModel`）；在那次部署上，同一请求需要 `bedrock:` 与 `bedrock-mantle:` 两个前缀。剩下的
+**推断**与**未实测**条目 —— 按 `endpointFlavor` 的前缀归因、从静态 `credentials` 铸造所需的 action、
+默认链背后的铸造步骤，以及 ① 显式 `bearerToken` 那格 —— 本轮没有独立实测证据；在依赖它们之前，请对照
+`@aws/bedrock-token-generator` 1.1.0 与 AWS Bedrock API Key / bearer 文档核实，或保留原标注。不要靠推断填入。
 
 ## 常见报错与排查
 
@@ -152,7 +178,11 @@ bearer token 在单一决策点解析，三条路径互斥，按优先级从高�
   provider 只解析**一次** region，并把同一个值同时喂给端点工具和 token 工具，因此此问题已被规避；
   绕过该保证（解析两次 region）会重新引入分裂，导致间歇性 403。
 - **401/403 且不回退。** bearer/认证失败即硬失败 —— 没有静默的 SigV4 重试。请直接排查
-  bearer 及其 IAM 权限。
+  bearer 及其 IAM 权限。在观测到的 `bedrock-runtime` 部署上，同一请求**同时**报了
+  `401 ... not authorized to perform: bedrock:CallWithBearerToken` **和**
+  `403 ... not authorized to perform: bedrock-mantle:CallWithBearerToken`；两条
+  `{service}:CallWithBearerToken` action 都得授予 —— **不是** `bedrock:InvokeModel`。
+  见 [IAM 前提](#iam-前提)。
 - **请求打到了非预期端点。** 检查 `endpointFlavor`。拼写错误，或用错了键名（`endpointType`），
   会被静默忽略，请求发往默认的 `bedrock-runtime` 主机。
 - **token 有效期短于请求值。** `tokenExpiresInSeconds` 超过 43200 会被静默截断为 12 小时。
